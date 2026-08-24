@@ -737,6 +737,28 @@ public static class Database
         return Convert.ToInt64(result);
     }
 
+    public static async Task DeleteEmptyThreadsAsync(
+        string databasePath)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+
+        await connection.OpenAsync();
+
+        var command = connection.CreateCommand();
+
+        command.CommandText = """
+        DELETE FROM Threads
+        WHERE NOT EXISTS
+        (
+            SELECT 1
+            FROM MessageThreads mt
+            WHERE mt.ThreadId = Threads.Id
+        );
+        """;
+
+        await command.ExecuteNonQueryAsync();
+    }
+
     public static async Task InsertMessageThreadAsync(
         string databasePath,
         MessageThreadRecord record)

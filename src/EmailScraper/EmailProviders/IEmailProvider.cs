@@ -6,9 +6,9 @@ public interface IEmailProvider
 
     Task<string?> GetSyncCheckpointAsync();
 
-    Task FullSyncAsync();
+    Task<SynchronizationResult> FullSyncAsync();
 
-    Task IncrementalSyncAsync(string syncCheckpoint);
+    Task<SynchronizationResult> IncrementalSyncAsync(string syncCheckpoint);
 
     Task RepairCorruptEmlFilesAsync();
 

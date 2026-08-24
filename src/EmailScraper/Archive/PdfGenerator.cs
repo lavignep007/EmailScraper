@@ -29,6 +29,7 @@ public static class PdfGenerator
         Console.WriteLine($"Threads found: {threads.Count:N0}");
 
         var messageCount = 0;
+        var messageSkipped = 0;
         var threadCount = 0;
         var errors = 0;
 
@@ -47,9 +48,10 @@ public static class PdfGenerator
                 {
                     try
                     {
-                        await GenerateMessagePdfAsync(databasePath, archivePath, messagePdfPath, message);
-
-                        messageCount++;
+                        if (await GenerateMessagePdfAsync(databasePath, archivePath, messagePdfPath, message))
+                            messageCount++;
+                        else
+                            messageSkipped++;
                     }
                     catch (Exception ex)
                     {
@@ -69,7 +71,7 @@ public static class PdfGenerator
                 threadCount++;
 
                 Console.Write($"\rThreads: {threadCount:N0}/{threads.Count:N0}  " +
-                    $"Messages: {messageCount:N0}  Errors: {errors:N0}");
+                    $"Messages: {messageCount:N0}  Skipped: {messageSkipped:N0}  Errors: {errors:N0}");
             }
             catch (Exception ex)
             {
@@ -87,17 +89,24 @@ public static class PdfGenerator
         Console.WriteLine("PDF generation finished.");
         Console.WriteLine($"Thread PDFs:   {threadCount:N0}");
         Console.WriteLine($"Message PDFs:  {messageCount:N0}");
+        Console.WriteLine($"Already exist: {messageSkipped:N0}");
         Console.WriteLine($"Errors:        {errors:N0}");
 
         Console.WriteLine();
     }
 
-    private static async Task GenerateMessagePdfAsync(
+    private static async Task<bool> GenerateMessagePdfAsync(
         string databasePath,
         string archivePath,
         string outputDirectory,
         PdfMessage message)
     {
+        var displayName = message.DisplayName ?? $"Message {message.Id}";
+        var fileName = $"{message.Id:D6} - {SanitizeFileName(ShortenFileNamePart(displayName) + ".pdf")}";
+        var outputPath = Path.Combine(outputDirectory, fileName);
+
+        if (File.Exists(outputPath)) return false;
+
         if (string.IsNullOrWhiteSpace(message.RelativePath)) throw new InvalidOperationException($"Message {message.Id} has no RelativePath.");
 
         var emlPath = Path.Combine(archivePath,
@@ -107,10 +116,6 @@ public static class PdfGenerator
 
         var mime = await Task.Run(() => MimeMessage.Load(emlPath));
         var attachments = await Database.GetAttachmentsForMessageAsync(databasePath, message.Id);
-        var displayName = message.DisplayName ?? $"Message {message.Id}";
-        var fileName = $"{message.Id:D6} - {SanitizeFileName(ShortenFileNamePart(displayName) + ".pdf")}";
-
-        var outputPath = Path.Combine(outputDirectory, fileName);
         var body = GetBodyText(mime);
 
         Document
@@ -143,6 +148,8 @@ public static class PdfGenerator
                 });
             })
             .GeneratePdf(outputPath);
+
+        return true;
     }
 
     private static async Task GenerateThreadPdfAsync(

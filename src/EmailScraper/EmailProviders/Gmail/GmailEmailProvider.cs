@@ -53,7 +53,7 @@ public sealed class GmailEmailProvider : IEmailProvider
     public Task<string?> GetSyncCheckpointAsync() =>
         Database.GetSyncStateAsync(config.DatabasePath, LastHistoryIdKey);
 
-    public async Task FullSyncAsync()
+    public async Task<SynchronizationResult> FullSyncAsync()
     {
         Console.WriteLine();
         Console.WriteLine("==========================================");
@@ -139,9 +139,11 @@ public sealed class GmailEmailProvider : IEmailProvider
         Console.WriteLine($"Discovered: {discovered:N0}");
         Console.WriteLine($"Downloaded: {downloaded:N0}");
         Console.WriteLine($"Already archived: {skipped:N0}");
+
+        return new SynchronizationResult(downloaded);
     }
 
-    public async Task IncrementalSyncAsync(string syncCheckpoint)
+    public async Task<SynchronizationResult> IncrementalSyncAsync(string syncCheckpoint)
     {
         Console.WriteLine();
         Console.WriteLine("==========================================");
@@ -195,8 +197,7 @@ public sealed class GmailEmailProvider : IEmailProvider
             Console.WriteLine("The stored Gmail history ID is no longer available.");
             Console.WriteLine("Gmail requires us to perform a FULL synchronization.");
             Console.WriteLine();
-            await FullSyncAsync();
-            return;
+            return await FullSyncAsync();
         }
 
         Console.WriteLine($"New Gmail messages found: {messageIds.Count:N0}");
@@ -212,7 +213,7 @@ public sealed class GmailEmailProvider : IEmailProvider
                 DateTimeOffset.UtcNow.ToString("O"));
 
             Console.WriteLine("Nothing new to archive.");
-            return;
+            return new SynchronizationResult(0);
         }
 
         long downloaded = 0;
@@ -254,6 +255,8 @@ public sealed class GmailEmailProvider : IEmailProvider
         Console.WriteLine("Incremental synchronization finished.");
         Console.WriteLine($"New messages downloaded: {downloaded:N0}");
         Console.WriteLine($"Already archived: {skipped:N0}");
+
+        return new SynchronizationResult(downloaded);
     }
 
     public Task ValidateAsync() =>

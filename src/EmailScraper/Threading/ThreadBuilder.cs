@@ -143,8 +143,12 @@ public static class ThreadBuilder
             await CreateThreadAsync(databasePath, group, byMessageId);
 
             threadCount++;
+            Console.Write($"\rThreads: {threadCount:N0}/{threadGroups.Count:N0}");
         }
 
+        await Database.DeleteEmptyThreadsAsync(databasePath);
+
+        Console.WriteLine();
         Console.WriteLine($"Threads created: {threadCount:N0}");
 
         Console.WriteLine("Thread reconstruction complete.");

@@ -41,98 +41,86 @@ foreach (var address in config.EmailAddresses)
 Console.WriteLine();
 
 var syncCheckpoint = await emailProvider.GetSyncCheckpointAsync();
+SynchronizationResult synchronization;
 
 if (string.IsNullOrWhiteSpace(syncCheckpoint))
 {
     Console.WriteLine("No synchronization state found.");
-    Console.WriteLine("This will be the initial FULL synchronization.");
+    Console.WriteLine("Starting the initial full synchronization automatically.");
     Console.WriteLine();
-    await emailProvider.FullSyncAsync();
+    synchronization = await emailProvider.FullSyncAsync();
 }
 else
 {
     Console.WriteLine($"Last synchronization checkpoint: {syncCheckpoint}");
+    Console.WriteLine("Starting incremental synchronization automatically.");
+    synchronization = await emailProvider.IncrementalSyncAsync(syncCheckpoint);
+}
+
+if (synchronization.Downloaded > 0)
+{
     Console.WriteLine();
-    Console.WriteLine("[I] Incremental synchronization (default)");
-    Console.WriteLine("[F] Full synchronization");
+    Console.WriteLine($"Processing {synchronization.Downloaded:N0} newly downloaded message(s)...");
+
+    await MimeParser.ParseArchiveAsync(config.DatabasePath, config.ArchivePath);
+    await ThreadBuilder.BuildAsync(config.DatabasePath);
+    await ArchiveOrganizer.RunAsync(config.DatabasePath, config.ArchivePath);
+    await PdfGenerator.GenerateAsync(config.DatabasePath, config.ArchivePath);
+    await SearchIndexer.BuildAsync(config.DatabasePath);
+}
+else
+{
     Console.WriteLine();
+    Console.WriteLine("No new messages downloaded. Archive processing is already up to date.");
+}
+
+while (true)
+{
+    Console.WriteLine();
+    Console.WriteLine("[S] Search archive");
+    Console.WriteLine("[C] Validate archive integrity");
+    Console.WriteLine("[Enter] Exit");
     Console.Write("Selection: ");
 
-    var input = Console.ReadLine()?.Trim().ToUpperInvariant();
+    var choice = Console.ReadLine()?.Trim().ToUpperInvariant();
 
-    if (input == "F")
-        await emailProvider.FullSyncAsync();
-    else
-        await emailProvider.IncrementalSyncAsync(syncCheckpoint);
-}
-
-Console.WriteLine();
-Console.WriteLine("[P] Parse local EML archive");
-Console.WriteLine("[R] Repair missing/empty EML files");
-Console.WriteLine("[T] Rebuild message threads");
-Console.WriteLine("[V] View thread diagnostic");
-Console.WriteLine("[O] Organize archive");
-Console.WriteLine("[D] Generate PDFs");
-Console.WriteLine("[X] Build search index");
-Console.WriteLine("[S] Search archive");
-Console.WriteLine("[C] Validate archive");
-Console.WriteLine("[Enter] Exit");
-Console.Write("Selection: ");
-
-var postSyncChoice = Console.ReadLine()?.Trim().ToUpperInvariant();
-
-switch (postSyncChoice)
-{
-    case "P":
-        await MimeParser.ParseArchiveAsync(config.DatabasePath, config.ArchivePath);
-        break;
-    case "R":
-        await emailProvider.RepairCorruptEmlFilesAsync();
-        break;
-    case "T":
-        await ThreadBuilder.BuildAsync(config.DatabasePath);
-        break;
-    case "V":
-        await ThreadDiagnostic.ShowAsync(config.DatabasePath);
-        break;
-    case "O":
-        await ArchiveOrganizer.RunAsync(config.DatabasePath, config.ArchivePath);
-        break;
-    case "D":
-        await PdfGenerator.GenerateAsync(config.DatabasePath, config.ArchivePath);
-        break;
-    case "X":
-        await SearchIndexer.BuildAsync(config.DatabasePath);
-        break;
-    case "C":
-        await emailProvider.ValidateAsync();
-        break;
-    case "S":
+    switch (choice)
     {
-        Console.Write("Search: ");
-        var query = Console.ReadLine()?.Trim();
-
-        if (string.IsNullOrWhiteSpace(query)) break;
-
-        var results = await Database.SearchAsync(config.DatabasePath, query);
-        Console.WriteLine();
-        Console.WriteLine($"Results: {results.Count:N0}");
-        Console.WriteLine();
-
-        foreach (var result in results)
+        case "S":
         {
-            Console.WriteLine($"Message #{result.MessageId}" +
-                (result.ThreadId.HasValue ? $"  Thread #{result.ThreadId}" : ""));
-            Console.WriteLine($"  Date   : {result.Date}");
-            Console.WriteLine($"  From   : {result.From}");
-            Console.WriteLine($"  Subject: {result.Subject}");
-            Console.WriteLine($"  {result.Snippet}");
-            Console.WriteLine();
-        }
+            Console.Write("Search: ");
+            var query = Console.ReadLine()?.Trim();
 
-        break;
+            if (string.IsNullOrWhiteSpace(query)) break;
+
+            var results = await Database.SearchAsync(config.DatabasePath, query);
+            Console.WriteLine();
+            Console.WriteLine($"Results: {results.Count:N0}");
+            Console.WriteLine();
+
+            foreach (var result in results)
+            {
+                Console.WriteLine($"Message #{result.MessageId}" +
+                    (result.ThreadId.HasValue ? $"  Thread #{result.ThreadId}" : ""));
+                Console.WriteLine($"  Date   : {result.Date}");
+                Console.WriteLine($"  From   : {result.From}");
+                Console.WriteLine($"  Subject: {result.Subject}");
+                Console.WriteLine($"  {result.Snippet}");
+                Console.WriteLine();
+            }
+
+            break;
+        }
+        case "C":
+            await emailProvider.ValidateAsync();
+            break;
+        case "":
+        case null:
+            Console.WriteLine();
+            Console.WriteLine("Done.");
+            return;
+        default:
+            Console.WriteLine("Unknown selection.");
+            break;
     }
 }
-
-Console.WriteLine();
-Console.WriteLine("Done.");
