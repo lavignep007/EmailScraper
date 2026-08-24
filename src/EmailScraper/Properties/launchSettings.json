@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "EmailScraper": {
+      "commandName": "Project",
+      "workingDirectory": "../..",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

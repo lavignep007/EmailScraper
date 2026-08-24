@@ -1,0 +1,14 @@
+* text=auto eol=crlf
+
+*.7z binary
+*.db binary
+*.dll binary
+*.eml binary
+*.exe binary
+*.gif binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.png binary
+*.zip binary
