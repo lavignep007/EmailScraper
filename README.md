@@ -24,8 +24,10 @@ EmailScraper currently supports:
 - Complete thread PDF generation
 - Full-text/search indexing
 - Archive validation and integrity checks
-- Stable Gmail and RFC Message-ID preservation
+- Stable provider message IDs and RFC Message-ID preservation
 - Incremental updates without re-downloading existing messages unnecessarily
+- Deterministic branching thread reconstruction with revision history
+- Revision-aware thread PDF regeneration
 
 ## Archive Structure
 
@@ -59,13 +61,13 @@ Attachments extracted from MIME messages.
 
 ### `pdf/messages/`
 
-Human-readable PDF representation of individual messages.
+Human-readable PDF representation of every archived message, including messages that do not belong to a logical thread. Existing individual-message PDFs are not regenerated because the source message is immutable.
 
 ### `pdf/threads/`
 
-PDF documents combining messages belonging to a reconstructed conversation thread.
+PDF documents combining messages belonging to active reconstructed conversation threads. Files use the stable local thread ID as their name, for example `000123.pdf`.
 
-PDF files are derived artifacts and can be regenerated from the archive.
+Thread PDFs are regenerated only when the corresponding thread revision changes. Stale thread PDFs are removed. All PDF files are derived artifacts and can be regenerated from the archive.
 
 ## Processing Pipeline
 
@@ -90,44 +92,53 @@ MIME parsing
 SQLite database
   │
   ▼
-Thread reconstruction
+Branching thread reconstruction
   │
-  ├──► Message PDFs
-  ├──► Thread PDFs
-  └──► Search index
+  ├──► Organization and display names
+  ├──► Individual message PDFs
+  ├──► Revision-aware thread PDFs
+  └──► Full-text search index
 ```
+
+At startup, the application chooses the synchronization mode automatically. A missing synchronization checkpoint triggers a full synchronization; otherwise, an incremental synchronization runs. When messages are downloaded, parsing, thread reconstruction, organization, PDF generation and search indexing run automatically in that order. When nothing is downloaded, the derived pipeline is skipped.
 
 ## Message Identity
 
 EmailScraper preserves several forms of message identity.
 
-### Gmail ID
+### Provider message ID
 
-The Gmail API message ID is stored as a stable identifier for the Gmail message.
+`Messages.ProviderMessageId` stores the source provider's stable message identifier. For the Gmail provider, its value is the Gmail API message ID.
+
+`Messages.ProviderThreadId` stores the provider's conversation identifier when available. It is useful metadata but does not uniquely identify one reconstructed logical branch.
 
 ### RFC Message-ID
 
 The original RFC `Message-ID` header is preserved when available.
 
-These identifiers should be preferred when correlating messages between archive generations.
+The RFC `Message-ID` is the preferred identity for correlating the same evidence between independently created or differently filtered databases. `ProviderMessageId` can also be used when the archives share the same provider context.
 
 Internal SQLite row IDs are implementation details and should not be considered stable identifiers across independently created databases.
 
 ## Thread Reconstruction
 
-Threads are reconstructed using standard email relationship headers, including:
+Threads are reconstructed from standard email relationship headers, including:
 
 - `Message-ID`
 - `In-Reply-To`
 - `References`
 
-This allows EmailScraper to reconstruct conversations independently of local database row IDs.
+The reconstructed structure is a reply graph. Each active logical thread is a root-to-leaf path containing at least two locally available messages. Branches may occur at any depth, and shared ancestors may therefore belong to multiple logical threads.
 
-Each reconstructed thread has a unique `ThreadKey` representing its logical identity.
+A genuinely standalone message does not create a thread or thread PDF, but it still receives an individual-message PDF and a search document.
 
-The SQLite `Threads.Id` value exists primarily as an internal relational key and should not be used as an external or permanent thread identifier.
+Each reconstructed thread has a unique `ThreadKey` derived from the leaf message's declared RFC lineage (`References`, `In-Reply-To` and its own `Message-ID`). A missing intermediate message can remain represented in this declared lineage even though no local `Messages` row is manufactured for it.
 
-Thread identity and cross-archive stability are areas of active development.
+`Threads.Id` is a stable local identity. A linear extension retains it; after a split, one deterministic continuation retains it and additional branches receive new local IDs. Numeric thread IDs are not intended to match between independently created databases.
+
+Current membership and parent relationships are stored in `MessageThreads`. A message may belong to multiple threads. `ThreadRevisions` and `ThreadRevisionMessages` preserve immutable historical memberships, while `ThreadRelations` records `Split` and `SupersededBy` relationships. `Threads.State` distinguishes active and superseded threads.
+
+`Threads.RevisionHash` identifies the current ordered membership and parent structure. `PdfRevisionHash` records the revision represented by the current thread PDF.
 
 ## Full Extraction
 
@@ -149,8 +160,6 @@ Build threads
 Generate PDFs
     ↓
 Build search index
-    ↓
-Validate archive
 ```
 
 A complete rebuild should be capable of recreating the derived archive from the source messages.
@@ -163,7 +172,9 @@ New messages are downloaded and added to the existing archive.
 
 Existing messages are not intentionally duplicated.
 
-After synchronization, derived data such as thread membership, PDFs and search documents can be regenerated to incorporate the new messages.
+When new messages are downloaded, the application automatically parses the archive, rebuilds threads, updates organization metadata, generates required PDFs and rebuilds the search index.
+
+When no messages are downloaded, these derived stages are skipped.
 
 Stable message identifiers allow successive archive versions to be compared even when internal database identifiers differ.
 
@@ -171,7 +182,7 @@ Stable message identifiers allow successive archive versions to be compared even
 
 EmailScraper preserves distinct source messages rather than attempting to collapse messages solely because their content appears identical.
 
-For example, an original message and a subsequently forwarded copy are separate email records and may have different Gmail IDs and RFC Message-IDs.
+For example, an original message and a subsequently forwarded copy are separate email records and may have different provider message IDs and RFC Message-IDs.
 
 This preserves the source mailbox accurately while allowing higher-level analysis to identify related or substantively duplicated content separately.
 
@@ -193,7 +204,6 @@ EmailScraper includes validation routines intended to detect inconsistencies suc
 - orphaned attachment records
 - duplicate identifiers
 - invalid message/thread relationships
-- missing generated artifacts
 - database inconsistencies
 
 Validation is intended to make archive-generation problems visible rather than silently producing an incomplete archive.
@@ -215,7 +225,20 @@ Additional libraries are used for message parsing, HTML processing and related a
 
 The application requires Gmail API credentials and appropriate authorization to access the mailbox being archived.
 
-Configuration includes the archive output location and Gmail authentication information.
+Configuration includes the provider, archive output location, database location and addresses used to select relevant messages:
+
+```json
+{
+  "EmailProvider": "Gmail",
+  "ArchivePath": "./archive",
+  "DatabasePath": "./archive/archive.db",
+  "EmailAddresses": [
+    "person@example.com"
+  ]
+}
+```
+
+`EmailAddresses` controls the Gmail query and the subsequent relevance check against sender and recipient headers.
 
 Secrets and authentication credentials should not be committed to source control.
 
@@ -266,7 +289,7 @@ If the application remains in **Testing** mode, add the Gmail account that will 
 
 **Google Auth Platform → Audience → Test users**
 
-Google only allows configured test users to authorize an External application while it is in testing mode. :contentReference[oaicite:0]{index=0}
+Google only allows configured test users to authorize an External application while it is in testing mode.
 
 ### 4. Configure Gmail permissions
 
@@ -281,6 +304,10 @@ add the Gmail scope:
 ```text
 https://www.googleapis.com/auth/gmail.readonly
 ```
+
+### 5. Create the desktop OAuth client
+
+Create an OAuth client with application type **Desktop app**, download its JSON credentials and make them available to the application as `credentials.json` in its runtime output directory. The first run opens the Google authorization flow and stores the resulting token locally.
 
 ## Usage
 
@@ -298,14 +325,13 @@ Run the test suite from the repository root:
 dotnet test
 ```
 
-The current development version exposes individual archive operations through an interactive menu.
+The synchronization and archive-processing pipeline is automatic. After it finishes, the console remains open and repeatedly offers:
 
-Typical usage consists of either:
+- `[S]` Search the archive
+- `[C]` Validate archive integrity
+- `[Enter]` Exit
 
-1. creating/rebuilding an archive from the mailbox; or
-2. performing an incremental synchronization and regenerating affected archive data.
-
-The user interface and workflow are expected to be simplified in future versions.
+The first run performs a full synchronization. Later runs perform an incremental synchronization from the stored provider checkpoint. If Gmail reports that the stored history position is no longer available, the provider falls back to a full synchronization.
 
 ## Data Safety
 
@@ -326,23 +352,14 @@ Known architectural limitations include:
 - Gmail is currently the primary supported mail source.
 - Thread reconstruction can evolve as additional edge cases are discovered.
 - Internal numeric database IDs are not guaranteed to remain identical across independent full rebuilds.
-- Generated thread artifact management is being improved.
+- `SearchDocuments` stores at most one thread ID per message; use `MessageThreads` when all memberships are required.
 - Search behavior and normalization are still evolving.
-- The console workflow contains development and diagnostic operations that will eventually be consolidated.
+- Derived processing currently runs only when synchronization downloads messages; external archive changes do not automatically trigger a rebuild.
+- The current schema is intended for fresh databases and does not provide migrations from earlier development schemas.
 
 ## Planned Development
 
 Future development is expected to include:
-
-### Simplified workflow
-
-Reduce the interactive interface to the principal operations:
-
-- Full archive/rebuild
-- Incremental synchronization
-- Search
-
-Parsing, thread reconstruction, PDF generation, indexing and validation should become automatic pipeline stages rather than operations the user normally invokes individually.
 
 ### Multiple mailbox profiles
 
@@ -360,7 +377,7 @@ archives/
 
 ### Additional email providers
 
-Separate mailbox acquisition from archive processing so additional providers can be supported.
+Implement additional acquisition providers against the existing provider interface and common archive model.
 
 A future architecture may resemble:
 
@@ -380,32 +397,9 @@ Email Source ──┼── Outlook / Microsoft 365
 
 The parsing, threading, PDF, indexing and validation layers should not need to know which provider supplied a message.
 
-### Stable cross-archive thread identity
+### Perspective archives
 
-Improve thread identity so equivalent conversations can be correlated reliably between independently generated or filtered archive databases.
-
-`ThreadKey` will remain the logical foundation while local SQLite IDs remain implementation details.
-
-### Improved search normalization
-
-Search should become insensitive to:
-
-- capitalization
-- accents/diacritics
-
-For example, searches for:
-
-```text
-Québec
-quebec
-QUEBEC
-```
-
-should produce equivalent results where appropriate.
-
-### Artifact generation
-
-Improve PDF generation so stale derived artifacts are removed or replaced atomically when threads change.
+Create derived, independently rebuilt archives representing the messages demonstrably visible to configured participant addresses. These projections must retain only visible messages and their referenced attachments while preserving RFC identity and partial-thread evidence.
 
 ## Development Status
 
