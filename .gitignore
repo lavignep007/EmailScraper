@@ -1,0 +1,32 @@
+# .NET / Visual Studio
+.vs/
+bin/
+obj/
+
+# Secrets / credentials
+credentials.json
+**/credentials.json
+.env
+**/.env
+appsettings.Development.json
+**/appsettings.Development.json
+secrets.json
+**/secrets.json
+
+# OAuth/token caches
+token.json
+tokens/
+**/tokens/
+*.token
+*.tokens
+
+# SQLite runtime files
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+
+# User-specific VS files
+*.user
+*.suo
