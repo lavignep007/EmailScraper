@@ -1,6 +1,6 @@
-# GmailArchive
+# EmailScraper
 
-GmailArchive is a .NET application for creating a local, structured and searchable archive of email messages.
+EmailScraper is a .NET application for creating a local, structured and searchable archive of email messages.
 
 It retrieves messages from Gmail, preserves the original email content, extracts attachments and metadata, reconstructs conversations into threads, generates human-readable PDF representations, and maintains a SQLite database and search index for querying the resulting archive.
 
@@ -11,7 +11,7 @@ The application supports both full archive creation and incremental synchronizat
 
 ## Features
 
-GmailArchive currently supports:
+EmailScraper currently supports:
 
 - Full Gmail mailbox extraction
 - Incremental synchronization using Gmail history
@@ -99,7 +99,7 @@ Thread reconstruction
 
 ## Message Identity
 
-GmailArchive preserves several forms of message identity.
+EmailScraper preserves several forms of message identity.
 
 ### Gmail ID
 
@@ -121,7 +121,7 @@ Threads are reconstructed using standard email relationship headers, including:
 - `In-Reply-To`
 - `References`
 
-This allows GmailArchive to reconstruct conversations independently of local database row IDs.
+This allows EmailScraper to reconstruct conversations independently of local database row IDs.
 
 Each reconstructed thread has a unique `ThreadKey` representing its logical identity.
 
@@ -157,7 +157,7 @@ A complete rebuild should be capable of recreating the derived archive from the 
 
 ## Incremental Synchronization
 
-After an initial archive has been created, GmailArchive can query Gmail for changes occurring after the last known Gmail history position.
+After an initial archive has been created, EmailScraper can query Gmail for changes occurring after the last known Gmail history position.
 
 New messages are downloaded and added to the existing archive.
 
@@ -169,7 +169,7 @@ Stable message identifiers allow successive archive versions to be compared even
 
 ## Duplicate and Forwarded Messages
 
-GmailArchive preserves distinct source messages rather than attempting to collapse messages solely because their content appears identical.
+EmailScraper preserves distinct source messages rather than attempting to collapse messages solely because their content appears identical.
 
 For example, an original message and a subsequently forwarded copy are separate email records and may have different Gmail IDs and RFC Message-IDs.
 
@@ -185,7 +185,7 @@ Search functionality is currently under development and will continue to improve
 
 ## Archive Validation
 
-GmailArchive includes validation routines intended to detect inconsistencies such as:
+EmailScraper includes validation routines intended to detect inconsistencies such as:
 
 - missing EML files
 - empty or invalid EML files
@@ -200,7 +200,7 @@ Validation is intended to make archive-generation problems visible rather than s
 
 ## Technology
 
-GmailArchive is currently built using:
+EmailScraper is currently built using:
 
 - .NET 10
 - C#
@@ -219,6 +219,69 @@ Configuration includes the archive output location and Gmail authentication info
 
 Secrets and authentication credentials should not be committed to source control.
 
+## Gmail Setup
+
+EmailScraper currently supports Gmail through the Gmail API using OAuth 2.0.
+
+The application uses a **Desktop OAuth client** and requests read-only access to Gmail.
+
+### 1. Create a Google Cloud project
+
+Open the Google Cloud Console and create a new project, or select an existing project you want to use for EmailScraper.
+
+The project is only used to register the application with Google and enable access to the Gmail API.
+
+### 2. Enable the Gmail API
+
+In the selected Google Cloud project:
+
+1. Open **APIs & Services**.
+2. Find **Gmail API**.
+3. Enable it for the project.
+
+The Gmail API must be enabled before OAuth credentials can be used to access Gmail.
+
+### 3. Configure the OAuth consent screen
+
+Open:
+
+**Google Auth Platform → Branding**
+
+If the Google Auth Platform has not yet been configured, select **Get Started**.
+
+Configure at least:
+
+- **App name:** `EmailScraper`
+- **User support email:** your email address
+- **Contact email:** your email address
+
+For the audience:
+
+- Choose **Internal** if the application is used only within a Google Workspace organization and that option is available.
+- Otherwise choose **External**.
+
+For a personal Gmail account, **External** will normally be used.
+
+If the application remains in **Testing** mode, add the Gmail account that will be archived under:
+
+**Google Auth Platform → Audience → Test users**
+
+Google only allows configured test users to authorize an External application while it is in testing mode. :contentReference[oaicite:0]{index=0}
+
+### 4. Configure Gmail permissions
+
+EmailScraper currently requires read-only Gmail access.
+
+Under:
+
+**Google Auth Platform → Data Access**
+
+add the Gmail scope:
+
+```text
+https://www.googleapis.com/auth/gmail.readonly
+```
+
 ## Usage
 
 The current application is console based.
@@ -226,7 +289,13 @@ The current application is console based.
 Run the application:
 
 ```bash
-dotnet run
+dotnet run --project src/EmailScraper
+```
+
+Run the test suite from the repository root:
+
+```bash
+dotnet test
 ```
 
 The current development version exposes individual archive operations through an interactive menu.
@@ -250,7 +319,7 @@ The application should not be considered a substitute for the original mail prov
 
 ## Current Limitations
 
-GmailArchive is under active development.
+EmailScraper is under active development.
 
 Known architectural limitations include:
 

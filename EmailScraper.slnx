@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/solution items/">
+    <File Path=".editorconfig" />
+    <File Path=".gitignore" />
+    <File Path="README.md" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/EmailScraper.Tests/EmailScraper.Tests.csproj" />
+  </Folder>
+  <Project Path="src/EmailScraper/EmailScraper.csproj" />
+</Solution>

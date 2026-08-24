@@ -15,6 +15,7 @@ secrets.json
 
 # OAuth/token caches
 token.json
+token/
 tokens/
 **/tokens/
 *.token
@@ -30,3 +31,6 @@ tokens/
 # User-specific VS files
 *.user
 *.suo
+
+# Archive
+/archive/

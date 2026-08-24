@@ -10,15 +10,11 @@
         Console.WriteLine("==========================================");
         Console.WriteLine();
 
-        var messages = await Database
-            .GetAllMessagesForThreadingAsync(
-                databasePath);
+        var messages = await Database.GetAllMessagesForThreadingAsync(databasePath);
 
         Console.WriteLine($"Messages: {messages.Count:N0}");
 
-        await Database
-            .SetThreadNamesFromSubjectsAsync(
-                databasePath);
+        await Database.SetThreadNamesFromSubjectsAsync(databasePath);
 
         var updated = 0;
 
@@ -27,9 +23,7 @@
             /*
              * Locate the original EML.
              */
-            var emlPath = FindEml(
-                archivePath, 
-                message.GmailId);
+            var emlPath = FindEml(archivePath, message.GmailId);
 
             if (emlPath == null)
             {
@@ -40,22 +34,12 @@
             }
 
             var relativePath = Path
-                .GetRelativePath(
-                    archivePath, 
-                    emlPath)
-                .Replace(
-                    Path.DirectorySeparatorChar, '/');
+                .GetRelativePath(archivePath, emlPath)
+                .Replace(Path.DirectorySeparatorChar, '/');
 
-            var displayName = DisplayNameBuilder
-                .Build(
-                    message);
+            var displayName = DisplayNameBuilder.Build(message);
 
-            await Database
-                .UpdateMessageOrganizationAsync(
-                    databasePath, 
-                    message.Id, 
-                    relativePath, 
-                    displayName);
+            await Database.UpdateMessageOrganizationAsync(databasePath, message.Id, relativePath, displayName);
 
             updated++;
         }
@@ -69,9 +53,7 @@
         string archivePath,
         string gmailId)
     {
-        var messagesPath = Path.Combine(
-            archivePath, 
-            "messages");
+        var messagesPath = Path.Combine(archivePath, "messages");
 
         if (!Directory.Exists(messagesPath))
         {
@@ -83,15 +65,10 @@
          * assuming a particular directory layout.
          */
         return Directory
-            .EnumerateFiles(
-                messagesPath, "*.eml",
-                SearchOption.AllDirectories)
+            .EnumerateFiles(messagesPath, "*.eml", SearchOption.AllDirectories)
             .FirstOrDefault(path => 
                 Path
-                    .GetFileNameWithoutExtension(
-                        path)
-                    .Contains(
-                        gmailId, 
-                        StringComparison.OrdinalIgnoreCase));
+                    .GetFileNameWithoutExtension(path)
+                    .Contains(gmailId, StringComparison.OrdinalIgnoreCase));
     }
 }
