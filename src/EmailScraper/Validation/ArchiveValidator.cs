@@ -169,22 +169,22 @@ public static class ArchiveValidator
 
         /*
          * ====================================================
-         * Duplicate Gmail IDs
+         * Duplicate provider message IDs
          *
-         * Should always be zero because GmailId is UNIQUE,
+         * Should always be zero because ProviderMessageId is UNIQUE,
          * but validation should still prove it.
          * ====================================================
          */
 
-        report.DuplicateGmailIds = await Database.ExecuteCountAsync(
+        report.DuplicateProviderMessageIds = await Database.ExecuteCountAsync(
             databasePath,
                 """
                 SELECT COUNT(*)
                 FROM
                 (
-                    SELECT GmailId
+                    SELECT ProviderMessageId
                     FROM Messages
-                    GROUP BY GmailId
+                    GROUP BY ProviderMessageId
                     HAVING COUNT(*) > 1
                 );
                 """);
@@ -192,7 +192,7 @@ public static class ArchiveValidator
         /*
          * Duplicate RFC Message-ID.
          *
-         * Unlike GmailId, this isn't necessarily fatal.
+         * Unlike ProviderMessageId, this isn't necessarily fatal.
          * Broken/forwarded/imported messages occasionally
          * reuse Message-ID values, so report it separately.
          */
@@ -265,7 +265,7 @@ public static class ArchiveValidator
 
         Console.WriteLine();
 
-        Console.WriteLine($"Duplicate Gmail IDs:       {report.DuplicateGmailIds:N0}");
+        Console.WriteLine($"Duplicate provider IDs:    {report.DuplicateProviderMessageIds:N0}");
         Console.WriteLine($"Duplicate Message-IDs:     {report.DuplicateMessageIds:N0}");
 
         Console.WriteLine();
@@ -400,7 +400,7 @@ public static class ArchiveValidator
     {
         var gmailIds = await GetMatchingGmailIdsAsync(gmail, gmailQuery);
 
-        var localIds = await Database.GetAllGmailIdsAsync(databasePath);
+        var localIds = await Database.GetAllProviderMessageIdsAsync(databasePath);
 
         var missingLocally = gmailIds
             .Except(localIds)

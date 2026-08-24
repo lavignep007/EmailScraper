@@ -32,12 +32,12 @@ public static class ArchiveOrganizer
             /*
              * Locate the original EML.
              */
-            emlIndex.TryGetValue(message.GmailId, out var emlPath);
+            emlIndex.TryGetValue(message.ProviderMessageId, out var emlPath);
 
             if (emlPath == null)
             {
                 Console.WriteLine();
-                Console.WriteLine($"WARNING: EML not found for " + $"{message.GmailId}");
+                Console.WriteLine($"WARNING: EML not found for " + $"{message.ProviderMessageId}");
                 missing++;
             }
             else
@@ -76,7 +76,7 @@ public static class ArchiveOrganizer
         }
 
         /*
-         * Downloaded EML files end with _{gmailId}.eml.
+         * Downloaded EML files end with _{providerMessageId}.eml.
          * Index them once instead of scanning the complete
          * archive separately for every database message.
          */
@@ -88,9 +88,9 @@ public static class ArchiveOrganizer
             if (separator < 0 || separator == fileName.Length - 1)
                 continue;
 
-            var gmailId = fileName[(separator + 1)..];
+            var providerMessageId = fileName[(separator + 1)..];
 
-            result.TryAdd(gmailId, path);
+            result.TryAdd(providerMessageId, path);
         }
 
         return result;

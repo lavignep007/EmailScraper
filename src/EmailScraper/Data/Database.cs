@@ -23,8 +23,8 @@ public static class Database
     (
         Id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-        GmailId TEXT NOT NULL UNIQUE,
-        GmailThreadId TEXT,
+        ProviderMessageId TEXT NOT NULL UNIQUE,
+        ProviderThreadId TEXT,
 
         MessageId TEXT,
         InReplyTo TEXT,
@@ -258,7 +258,7 @@ public static class Database
 
     public static async Task<bool> MessageExistsAsync(
         string databasePath,
-        string gmailId)
+        string providerMessageId)
     {
         await using var connection = new SqliteConnection($"Data Source={databasePath}");
 
@@ -269,10 +269,10 @@ public static class Database
         command.CommandText = """
             SELECT COUNT(*)
             FROM Messages
-            WHERE GmailId = $gmailId
+            WHERE ProviderMessageId = $providerMessageId
             """;
 
-        command.Parameters.AddWithValue("$gmailId", gmailId);
+        command.Parameters.AddWithValue("$providerMessageId", providerMessageId);
 
         var result = await command.ExecuteScalarAsync();
 
@@ -292,8 +292,8 @@ public static class Database
         command.CommandText = """
             INSERT INTO Messages
             (
-                GmailId,
-                GmailThreadId,
+                ProviderMessageId,
+                ProviderThreadId,
                 MessageId,
                 InReplyTo,
                 ReferencesHeader,
@@ -310,8 +310,8 @@ public static class Database
             )
             VALUES
             (
-                $gmailId,
-                $gmailThreadId,
+                $providerMessageId,
+                $providerThreadId,
                 $messageId,
                 $inReplyTo,
                 $references,
@@ -328,8 +328,8 @@ public static class Database
             );
             """;
 
-        command.Parameters.AddWithValue("$gmailId", message.GmailId);
-        command.Parameters.AddWithValue("$gmailThreadId", (object?)message.GmailThreadId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$providerMessageId", message.ProviderMessageId);
+        command.Parameters.AddWithValue("$providerThreadId", (object?)message.ProviderThreadId ?? DBNull.Value);
         command.Parameters.AddWithValue("$messageId", (object?)message.MessageId ?? DBNull.Value);
         command.Parameters.AddWithValue("$inReplyTo", (object?)message.InReplyTo ?? DBNull.Value);
         command.Parameters.AddWithValue("$references", (object?)message.References ?? DBNull.Value);
@@ -400,9 +400,9 @@ public static class Database
         await command.ExecuteNonQueryAsync();
     }
 
-    public static async Task<DatabaseMessage?> GetMessageByGmailIdAsync(
+    public static async Task<DatabaseMessage?> GetMessageByProviderMessageIdAsync(
         string databasePath,
-        string gmailId)
+        string providerMessageId)
     {
         await using var connection = new SqliteConnection($"Data Source={databasePath}");
 
@@ -413,13 +413,13 @@ public static class Database
         command.CommandText = """
         SELECT
             Id,
-            GmailId,
+            ProviderMessageId,
             ParserVersion
         FROM Messages
-        WHERE GmailId = $gmailId;
+        WHERE ProviderMessageId = $providerMessageId;
         """;
 
-        command.Parameters.AddWithValue("$gmailId", gmailId);
+        command.Parameters.AddWithValue("$providerMessageId", providerMessageId);
 
         await using var reader = await command.ExecuteReaderAsync();
 
@@ -428,7 +428,7 @@ public static class Database
         return new DatabaseMessage
         {
             Id = reader.GetInt64(0),
-            GmailId = reader.GetString(1),
+            ProviderMessageId = reader.GetString(1),
             ParserVersion = reader.IsDBNull(2) ? null : reader.GetInt32(2)
         };
     }
@@ -473,7 +473,7 @@ public static class Database
         command.CommandText = """
     UPDATE Messages
     SET
-        GmailThreadId = $gmailThreadId,
+        ProviderThreadId = $providerThreadId,
         MessageId = $messageIdHeader,
         InReplyTo = $inReplyTo,
         ReferencesHeader = $references,
@@ -485,7 +485,7 @@ public static class Database
     WHERE Id = $id;
     """;
 
-        command.Parameters.AddWithValue("$gmailThreadId", (object?)message.GmailThreadId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$providerThreadId", (object?)message.ProviderThreadId ?? DBNull.Value);
         command.Parameters.AddWithValue("$messageIdHeader", (object?)message.MessageId ?? DBNull.Value);
         command.Parameters.AddWithValue("$inReplyTo", (object?)message.InReplyTo ?? DBNull.Value);
         command.Parameters.AddWithValue("$references", (object?)message.References ?? DBNull.Value);
@@ -627,8 +627,8 @@ public static class Database
         command.CommandText = """
         SELECT
             Id,
-            GmailId,
-            GmailThreadId,
+            ProviderMessageId,
+            ProviderThreadId,
             MessageId,
             InReplyTo,
             ReferencesHeader,
@@ -650,8 +650,8 @@ public static class Database
             result.Add(new ThreadMessage
             {
                 Id = reader.GetInt64(0),
-                GmailId = reader.GetString(1),
-                GmailThreadId = reader.IsDBNull(2) ? null : reader.GetString(2),
+                ProviderMessageId = reader.GetString(1),
+                ProviderThreadId = reader.IsDBNull(2) ? null : reader.GetString(2),
                 MessageId = reader.IsDBNull(3) ? null : reader.GetString(3),
                 InReplyTo = reader.IsDBNull(4) ? null : reader.GetString(4),
                 References = reader.IsDBNull(5) ? null : reader.GetString(5),
@@ -1123,7 +1123,7 @@ public static class Database
         command.CommandText = """
         SELECT
             Id,
-            GmailId,
+            ProviderMessageId,
             FilePath
         FROM Messages
         ORDER BY Id;
@@ -1136,7 +1136,7 @@ public static class Database
             result.Add(new EmlRepairRecord
             {
                 Id = reader.GetInt64(0),
-                GmailId = reader.GetString(1),
+                ProviderMessageId = reader.GetString(1),
                 FilePath = reader.IsDBNull(2) ? "" : reader.GetString(2)
             });
         }
@@ -1144,10 +1144,10 @@ public static class Database
         return result;
     }
 
-    public static async Task UpdateGmailThreadIdAsync(
+    public static async Task UpdateProviderThreadIdAsync(
         string databasePath,
         long messageId,
-    string? gmailThreadId)
+        string? providerThreadId)
     {
         await using var connection = new SqliteConnection($"Data Source={databasePath}");
 
@@ -1157,11 +1157,11 @@ public static class Database
 
         command.CommandText = """
         UPDATE Messages
-        SET GmailThreadId = $gmailThreadId
+        SET ProviderThreadId = $providerThreadId
         WHERE Id = $id;
         """;
 
-        command.Parameters.AddWithValue("$gmailThreadId", (object?)gmailThreadId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$providerThreadId", (object?)providerThreadId ?? DBNull.Value);
         command.Parameters.AddWithValue("$id", messageId);
 
         await command.ExecuteNonQueryAsync();
@@ -1374,7 +1374,7 @@ public static class Database
         command.CommandText = """
     SELECT
         Id,
-        GmailId,
+        ProviderMessageId,
         MessageId,
         FilePath
     FROM Messages
@@ -1388,7 +1388,7 @@ public static class Database
             result.Add(new ValidationMessage
             {
                 Id = reader.GetInt64(0),
-                GmailId = reader.GetString(1),
+                ProviderMessageId = reader.GetString(1),
                 MessageId = reader.IsDBNull(2) ? null : reader.GetString(2),
                 FilePath = reader.GetString(3)
             });
@@ -1415,7 +1415,7 @@ public static class Database
         return Convert.ToInt32(value);
     }
 
-    public static async Task<HashSet<string>> GetAllGmailIdsAsync(
+    public static async Task<HashSet<string>> GetAllProviderMessageIdsAsync(
         string databasePath)
     {
         var result = new HashSet<string>(StringComparer.Ordinal);
@@ -1427,10 +1427,10 @@ public static class Database
         var command = connection.CreateCommand();
 
         command.CommandText = """
-    SELECT GmailId
+    SELECT ProviderMessageId
     FROM Messages
-    WHERE GmailId IS NOT NULL
-      AND TRIM(GmailId) <> '';
+    WHERE ProviderMessageId IS NOT NULL
+      AND TRIM(ProviderMessageId) <> '';
     """;
 
         await using var reader = await command.ExecuteReaderAsync();

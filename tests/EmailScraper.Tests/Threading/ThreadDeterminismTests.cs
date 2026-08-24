@@ -66,7 +66,7 @@ public sealed class ThreadDeterminismTests
 
     private static MessageRecord Message(string gmailId, string messageId, string? inReplyTo, string date) => new()
     {
-        GmailId = gmailId,
+        ProviderMessageId = gmailId,
         MessageId = messageId,
         InReplyTo = inReplyTo,
         Date = date,

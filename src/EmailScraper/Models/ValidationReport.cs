@@ -17,7 +17,7 @@ public sealed class ValidationReport
     public int MessagesWithoutThread { get; set; }
     public int BrokenParents { get; set; }
 
-    public int DuplicateGmailIds { get; set; }
+    public int DuplicateProviderMessageIds { get; set; }
     public int DuplicateMessageIds { get; set; }
 
     public int MissingSearchDocuments { get; set; }
@@ -30,6 +30,6 @@ public sealed class ValidationReport
         OrphanAttachments +
         MessagesWithoutThread +
         BrokenParents +
-        DuplicateGmailIds +
+        DuplicateProviderMessageIds +
         MissingSearchDocuments;
 }

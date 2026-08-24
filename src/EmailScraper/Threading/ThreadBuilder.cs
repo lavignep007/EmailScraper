@@ -283,17 +283,17 @@ public static class ThreadBuilder
         List<ThreadMessage> messages)
     {
         /*
-         * GmailThreadId is optional.
+         * ProviderThreadId is optional.
          *
          * If we eventually restore it, use it as a useful
          * stable identifier, but it is NOT required for
          * thread reconstruction.
          */
-        var gmailThreadId = messages
-            .Select(x => x.GmailThreadId)
+        var providerThreadId = messages
+            .Select(x => x.ProviderThreadId)
             .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
 
-        if (!string.IsNullOrWhiteSpace(gmailThreadId)) return $"gmail:{gmailThreadId}";
+        if (!string.IsNullOrWhiteSpace(providerThreadId)) return $"gmail:{providerThreadId}";
 
         /*
          * Otherwise use the Message-ID of the root/oldest

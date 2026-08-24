@@ -2,9 +2,9 @@
 
 public sealed class MessageRecord
 {
-    public string GmailId { get; set; } = "";
+    public string ProviderMessageId { get; set; } = "";
 
-    public string? GmailThreadId { get; set; }
+    public string? ProviderThreadId { get; set; }
 
     public string? MessageId { get; set; }
 

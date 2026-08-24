@@ -39,12 +39,12 @@ public static class MimeParser
         {
             try
             {
-                var gmailId = Path
+                var providerMessageId = Path
                     .GetFileNameWithoutExtension(file)
                     .Split('_')
                     .Last();
 
-                var message = await Database.GetMessageByGmailIdAsync(databasePath, gmailId);
+                var message = await Database.GetMessageByProviderMessageIdAsync(databasePath, providerMessageId);
 
                 if (message == null)
                 {

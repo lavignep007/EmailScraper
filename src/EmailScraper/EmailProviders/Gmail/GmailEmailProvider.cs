@@ -294,7 +294,7 @@ public sealed class GmailEmailProvider : IEmailProvider
             try
             {
                 Console.WriteLine($"Repairing message {item.Id}...");
-                var gmailMessage = await GetRawMessageAsync(item.GmailId);
+                var gmailMessage = await GetRawMessageAsync(item.ProviderMessageId);
                 var rawBytes = DecodeBase64Url(gmailMessage.Raw!);
 
                 if (rawBytes.Length == 0)
@@ -313,7 +313,7 @@ public sealed class GmailEmailProvider : IEmailProvider
                     throw new InvalidOperationException("Temporary repaired EML is empty.");
 
                 File.Move(tempPath, item.FilePath, overwrite: true);
-                await Database.UpdateGmailThreadIdAsync(config.DatabasePath, item.Id, gmailMessage.ThreadId);
+                await Database.UpdateProviderThreadIdAsync(config.DatabasePath, item.Id, gmailMessage.ThreadId);
 
                 Console.WriteLine($"  OK - {rawBytes.Length:N0} bytes");
                 repaired++;
@@ -363,8 +363,8 @@ public sealed class GmailEmailProvider : IEmailProvider
         await File.WriteAllBytesAsync(filePath, rawBytes);
         await Database.InsertMessageAsync(config.DatabasePath, new MessageRecord
         {
-            GmailId = gmailMessageId,
-            GmailThreadId = message.ThreadId,
+            ProviderMessageId = gmailMessageId,
+            ProviderThreadId = message.ThreadId,
             MessageId = messageId,
             InReplyTo = inReplyTo,
             References = references,
