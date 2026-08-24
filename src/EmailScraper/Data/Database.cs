@@ -1212,6 +1212,54 @@ public static class Database
         return result;
     }
 
+    public static async Task<List<PdfMessage>> GetAllPdfMessagesAsync(
+        string databasePath)
+    {
+        var result = new List<PdfMessage>();
+
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        SELECT
+            Id,
+            MessageType,
+            ReactionEmoji,
+            Date,
+            Subject,
+            FromAddress,
+            ToAddresses,
+            CcAddresses,
+            BccAddresses,
+            RelativePath,
+            DisplayName
+        FROM Messages
+        ORDER BY Id;
+        """;
+
+        await using var reader = await command.ExecuteReaderAsync();
+
+        while (await reader.ReadAsync())
+        {
+            result.Add(new PdfMessage
+            {
+                Id = reader.GetInt64(0),
+                MessageType = reader.GetString(1),
+                ReactionEmoji = reader.IsDBNull(2) ? null : reader.GetString(2),
+                Date = reader.IsDBNull(3) ? null : reader.GetString(3),
+                Subject = reader.IsDBNull(4) ? null : reader.GetString(4),
+                From = reader.IsDBNull(5) ? null : reader.GetString(5),
+                To = reader.IsDBNull(6) ? null : reader.GetString(6),
+                Cc = reader.IsDBNull(7) ? null : reader.GetString(7),
+                Bcc = reader.IsDBNull(8) ? null : reader.GetString(8),
+                RelativePath = reader.IsDBNull(9) ? null : reader.GetString(9),
+                DisplayName = reader.IsDBNull(10) ? null : reader.GetString(10)
+            });
+        }
+
+        return result;
+    }
+
     public static async Task<List<ThreadRecord>> GetAllThreadsAsync(
         string databasePath)
     {

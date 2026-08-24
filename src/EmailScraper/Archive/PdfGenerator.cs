@@ -25,14 +25,39 @@ public static class PdfGenerator
         Console.WriteLine();
 
         var threads = await Database.GetAllThreadsAsync(databasePath);
+        var allMessages = await Database.GetAllPdfMessagesAsync(databasePath);
 
         Console.WriteLine($"Threads found: {threads.Count:N0}");
+        Console.WriteLine($"Messages found: {allMessages.Count:N0}");
 
         var messageCount = 0;
         var messageSkipped = 0;
         var threadCount = 0;
         var threadSkipped = 0;
         var errors = 0;
+
+        foreach (var message in allMessages)
+        {
+            try
+            {
+                if (await GenerateMessagePdfAsync(databasePath, archivePath, messagePdfPath, message))
+                    messageCount++;
+                else
+                    messageSkipped++;
+
+                Console.Write($"\rMessages: {messageCount + messageSkipped:N0}/{allMessages.Count:N0}  " +
+                    $"Generated: {messageCount:N0}  Skipped: {messageSkipped:N0}  Errors: {errors:N0}");
+            }
+            catch (Exception ex)
+            {
+                errors++;
+                Console.WriteLine();
+                Console.WriteLine($"ERROR message {message.Id}:");
+                Console.WriteLine($"  {ex.Message}");
+            }
+        }
+
+        Console.WriteLine();
 
         foreach (var thread in threads)
         {
@@ -43,28 +68,6 @@ public static class PdfGenerator
                 if (messages.Count == 0) continue;
 
                 var threadOutputPath = GetThreadPdfPath(threadPdfPath, thread);
-
-                /*
-                 * Generate individual message PDFs.
-                 */
-                foreach (var message in messages)
-                {
-                    try
-                    {
-                        if (await GenerateMessagePdfAsync(databasePath, archivePath, messagePdfPath, message))
-                            messageCount++;
-                        else
-                            messageSkipped++;
-                    }
-                    catch (Exception ex)
-                    {
-                        errors++;
-
-                        Console.WriteLine();
-                        Console.WriteLine($"ERROR message {message.Id}:");
-                        Console.WriteLine($"  {ex.Message}");
-                    }
-                }
 
                 /*
                  * Generate complete thread PDF.
@@ -81,9 +84,8 @@ public static class PdfGenerator
                     threadCount++;
                 }
 
-                Console.Write($"\rThreads: {threadCount:N0}/{threads.Count:N0}  " +
-                    $"Thread skipped: {threadSkipped:N0}  Messages: {messageCount:N0}  " +
-                    $"Skipped: {messageSkipped:N0}  Errors: {errors:N0}");
+                Console.Write($"\rThreads: {threadCount + threadSkipped:N0}/{threads.Count:N0}  " +
+                    $"Generated: {threadCount:N0}  Skipped: {threadSkipped:N0}  Errors: {errors:N0}");
             }
             catch (Exception ex)
             {
