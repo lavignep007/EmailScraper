@@ -6,6 +6,8 @@ public sealed class ThreadRecord
 
     public string ThreadKey { get; set; } = "";
 
+    public string? ProviderThreadId { get; set; }
+
     public string? Subject { get; set; }
 
     public string? FirstDate { get; set; }
@@ -13,4 +15,8 @@ public sealed class ThreadRecord
     public string? LastDate { get; set; }
 
     public string? Name { get; internal set; }
+
+    public string RevisionHash { get; set; } = "";
+
+    public string? PdfRevisionHash { get; set; }
 }

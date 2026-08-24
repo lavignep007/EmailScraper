@@ -31,6 +31,7 @@ public static class PdfGenerator
         var messageCount = 0;
         var messageSkipped = 0;
         var threadCount = 0;
+        var threadSkipped = 0;
         var errors = 0;
 
         foreach (var thread in threads)
@@ -40,6 +41,8 @@ public static class PdfGenerator
                 var messages = await Database.GetPdfMessagesForThreadAsync(databasePath, thread.Id);
 
                 if (messages.Count == 0) continue;
+
+                var threadOutputPath = GetThreadPdfPath(threadPdfPath, thread);
 
                 /*
                  * Generate individual message PDFs.
@@ -66,12 +69,21 @@ public static class PdfGenerator
                 /*
                  * Generate complete thread PDF.
                  */
-                await GenerateThreadPdfAsync(databasePath, archivePath, threadPdfPath, thread, messages);
-
-                threadCount++;
+                if (string.Equals(thread.RevisionHash, thread.PdfRevisionHash, StringComparison.Ordinal) &&
+                    File.Exists(threadOutputPath))
+                {
+                    threadSkipped++;
+                }
+                else
+                {
+                    await GenerateThreadPdfAsync(databasePath, archivePath, threadOutputPath, thread, messages);
+                    await Database.SetThreadPdfRevisionAsync(databasePath, thread.Id, thread.RevisionHash);
+                    threadCount++;
+                }
 
                 Console.Write($"\rThreads: {threadCount:N0}/{threads.Count:N0}  " +
-                    $"Messages: {messageCount:N0}  Skipped: {messageSkipped:N0}  Errors: {errors:N0}");
+                    $"Thread skipped: {threadSkipped:N0}  Messages: {messageCount:N0}  " +
+                    $"Skipped: {messageSkipped:N0}  Errors: {errors:N0}");
             }
             catch (Exception ex)
             {
@@ -88,11 +100,20 @@ public static class PdfGenerator
 
         Console.WriteLine("PDF generation finished.");
         Console.WriteLine($"Thread PDFs:   {threadCount:N0}");
+        Console.WriteLine($"Threads current: {threadSkipped:N0}");
         Console.WriteLine($"Message PDFs:  {messageCount:N0}");
         Console.WriteLine($"Already exist: {messageSkipped:N0}");
         Console.WriteLine($"Errors:        {errors:N0}");
 
         Console.WriteLine();
+
+        var expectedThreadPdfs = threads
+            .Select(x => GetThreadPdfPath(threadPdfPath, x))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var path in Directory.EnumerateFiles(threadPdfPath, "*.pdf"))
+            if (!expectedThreadPdfs.Contains(path))
+                File.Delete(path);
     }
 
     private static async Task<bool> GenerateMessagePdfAsync(
@@ -155,15 +176,10 @@ public static class PdfGenerator
     private static async Task GenerateThreadPdfAsync(
         string databasePath,
         string archivePath,
-        string outputDirectory,
+        string outputPath,
         ThreadRecord thread,
         List<PdfMessage> messages)
     {
-        var threadName = string.IsNullOrWhiteSpace(thread.Name) ? $"Thread {thread.Id}" : thread.Name;
-        var fileName = ShortenFileNamePart($"{thread.Id:D6} - {SanitizeFileName(threadName)}.pdf");
-
-        var outputPath = Path.Combine(outputDirectory, fileName);
-
         /*
          * Load all EML bodies first.
          */
@@ -243,6 +259,11 @@ public static class PdfGenerator
             })
             .GeneratePdf(outputPath);
     }
+
+    private static string GetThreadPdfPath(
+        string outputDirectory,
+        ThreadRecord thread) =>
+        Path.Combine(outputDirectory, $"{thread.Id:D6}.pdf");
 
     private static void ComposeMessageHeader(
         IContainer container,

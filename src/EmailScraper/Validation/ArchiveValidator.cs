@@ -81,7 +81,8 @@ public static class ArchiveValidator
             databasePath,
                 """
                 SELECT COUNT(*)
-                FROM Threads;
+                FROM Threads
+                WHERE State = 'Active';
                 """);
 
         report.Attachments = await Database.ExecuteCountAsync(

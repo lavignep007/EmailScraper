@@ -1,5 +1,8 @@
 namespace EmailScraper.Threading;
 
+using System.Security.Cryptography;
+using System.Text;
+
 public static class ThreadBuilder
 {
     public const int CurrentVersion = 2;
@@ -14,6 +17,7 @@ public static class ThreadBuilder
         Console.WriteLine();
 
         var messages = await Database.GetAllMessagesForThreadingAsync(databasePath);
+        var existingThreads = await Database.GetExistingThreadsAsync(databasePath);
 
         Console.WriteLine($"Messages found: {messages.Count:N0}");
 
@@ -34,7 +38,9 @@ public static class ThreadBuilder
         var byMessageId = messages
             .Where(x => !string.IsNullOrWhiteSpace(x.MessageId))
             .GroupBy(x => NormalizeMessageId(x.MessageId!))
-            .ToDictionary(x => x.Key, x => x.First());
+            .ToDictionary(
+                x => x.Key,
+                x => x.OrderBy(GetCanonicalMessageIdentity, StringComparer.Ordinal).First());
 
         /*
          * Statistics.
@@ -112,18 +118,25 @@ public static class ThreadBuilder
          * ----------------------------------------------------
          */
 
-        var threadGroups = messages
+        var connectedComponents = messages
             .GroupBy(x => unionFind.Find(x.Id))
             .Select(x => x.ToList())
             .OrderBy(x => x.Min(GetDate))
+            .ToList();
+
+        var threadGroups = connectedComponents
+            .SelectMany(x => BuildReplyPaths(x, byMessageId))
+            .Where(x => x.Count > 1)
+            .OrderBy(x => x.Min(GetDate))
+            .ThenBy(BuildThreadKey, StringComparer.Ordinal)
             .ToList();
 
         /*
          * Messages which have no relationship whatsoever are
          * naturally represented as single-message components.
          */
-        var standaloneMessages = threadGroups.Count(x =>
-            x.Count == 1 && !HasThreadRelationship(x[0], byMessageId));
+        var threadedMessageIds = threadGroups.SelectMany(x => x).Select(x => x.Id).ToHashSet();
+        var standaloneMessages = messages.Count(x => !threadedMessageIds.Contains(x.Id));
 
         Console.WriteLine($"Logical thread groups: {threadGroups.Count:N0}");
         Console.WriteLine($"Standalone messages   : {standaloneMessages:N0}");
@@ -137,16 +150,53 @@ public static class ThreadBuilder
          */
 
         var threadCount = 0;
+        var assignments = MatchExistingThreads(existingThreads, threadGroups);
+        var assignedExistingIds = assignments.Values.Select(x => x.Id).ToHashSet();
+        var currentThreadIds = new Dictionary<string, long>(StringComparer.Ordinal);
+
+        foreach (var obsolete in existingThreads.Where(x => !assignedExistingIds.Contains(x.Id)))
+            await Database.DeactivateThreadAsync(databasePath, obsolete.Id);
 
         foreach (var group in threadGroups)
         {
-            await CreateThreadAsync(databasePath, group, byMessageId);
+            var key = BuildThreadKey(group);
+            assignments.TryGetValue(key, out var existing);
+            var threadId = await CreateThreadAsync(databasePath, group, byMessageId, existing);
+            currentThreadIds[key] = threadId;
+
+            if (existing == null)
+            {
+                var splitFrom = existingThreads
+                    .Where(x => x.MessageIds.Intersect(group.Select(m => m.Id)).Any())
+                    .OrderByDescending(x => x.MessageIds.Intersect(group.Select(m => m.Id)).Count())
+                    .ThenBy(x => x.Id)
+                    .FirstOrDefault();
+
+                if (splitFrom != null && assignedExistingIds.Contains(splitFrom.Id))
+                    await Database.AddThreadRelationAsync(databasePath, splitFrom.Id, threadId, "Split");
+            }
 
             threadCount++;
             Console.Write($"\rThreads: {threadCount:N0}/{threadGroups.Count:N0}");
         }
 
-        await Database.DeleteEmptyThreadsAsync(databasePath);
+        foreach (var obsolete in existingThreads.Where(x => !assignedExistingIds.Contains(x.Id)))
+        {
+            var successor = threadGroups
+                .Select(group => new
+                {
+                    Key = BuildThreadKey(group),
+                    Overlap = group.Count(message => obsolete.MessageIds.Contains(message.Id))
+                })
+                .Where(x => x.Overlap > 0)
+                .OrderByDescending(x => x.Overlap)
+                .ThenBy(x => x.Key, StringComparer.Ordinal)
+                .FirstOrDefault();
+
+            if (successor != null)
+                await Database.AddThreadRelationAsync(
+                    databasePath, obsolete.Id, currentThreadIds[successor.Key], "SupersededBy");
+        }
 
         Console.WriteLine();
         Console.WriteLine($"Threads created: {threadCount:N0}");
@@ -159,22 +209,39 @@ public static class ThreadBuilder
     private static async Task<long> CreateThreadAsync(
         string databasePath,
         List<ThreadMessage> messages,
-        Dictionary<string, ThreadMessage> byMessageId)
+        Dictionary<string, ThreadMessage> byMessageId,
+        ExistingThread? existing)
     {
         var ordered = messages
             .OrderBy(GetDate)
-            .ThenBy(x => x.Id)
+            .ThenBy(GetCanonicalMessageIdentity, StringComparer.Ordinal)
             .ToList();
         var first = ordered.First();
         var last = ordered.Last();
         var threadKey = BuildThreadKey(ordered);
-        var threadId = await Database.InsertThreadAsync(databasePath, new ThreadRecord
+        var record = new ThreadRecord
         {
+            Id = existing?.Id ?? 0,
             ThreadKey = threadKey,
+            ProviderThreadId = ordered
+                .Select(x => x.ProviderThreadId)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .OrderBy(x => x, StringComparer.Ordinal)
+                .FirstOrDefault(),
             Subject = CleanSubject(first.Subject),
             FirstDate = first.Date,
-            LastDate = last.Date
-        });
+            LastDate = last.Date,
+            RevisionHash = BuildRevisionHash(ordered, byMessageId)
+        };
+        long threadId;
+
+        if (existing == null)
+            threadId = await Database.InsertThreadAsync(databasePath, record);
+        else
+        {
+            await Database.UpdateThreadAsync(databasePath, record);
+            threadId = existing.Id;
+        }
 
         /*
          * Build parent relationships.
@@ -248,7 +315,67 @@ public static class ThreadBuilder
             });
         }
 
+        await Database.RecordThreadRevisionAsync(
+            databasePath, threadId, threadKey, record.RevisionHash);
+
         return threadId;
+    }
+
+    private static Dictionary<string, ExistingThread> MatchExistingThreads(
+        List<ExistingThread> existingThreads,
+        List<List<ThreadMessage>> groups)
+    {
+        var result = new Dictionary<string, ExistingThread>(StringComparer.Ordinal);
+        var availableGroups = groups.ToDictionary(BuildThreadKey, x => x, StringComparer.Ordinal);
+        var usedExisting = new HashSet<long>();
+
+        foreach (var existing in existingThreads.OrderBy(x => x.Id))
+        {
+            if (!availableGroups.ContainsKey(existing.ThreadKey)) continue;
+
+            result[existing.ThreadKey] = existing;
+            availableGroups.Remove(existing.ThreadKey);
+            usedExisting.Add(existing.Id);
+        }
+
+        foreach (var existing in existingThreads.Where(x => !usedExisting.Contains(x.Id)).OrderBy(x => x.Id))
+        {
+            var match = availableGroups
+                .Select(x => new
+                {
+                    x.Key,
+                    Overlap = x.Value.Count(message => existing.MessageIds.Contains(message.Id))
+                })
+                .Where(x => x.Overlap > 0)
+                .OrderByDescending(x => x.Overlap)
+                .ThenBy(x => x.Key, StringComparer.Ordinal)
+                .FirstOrDefault();
+
+            if (match == null) continue;
+
+            result[match.Key] = existing;
+            availableGroups.Remove(match.Key);
+        }
+
+        return result;
+    }
+
+    private static string BuildRevisionHash(
+        List<ThreadMessage> messages,
+        Dictionary<string, ThreadMessage> byMessageId)
+    {
+        var value = string.Join("\n", messages.Select((message, index) =>
+        {
+            var componentIds = messages.Select(x => x.Id).ToHashSet();
+            var parentId = ResolveParent(message, componentIds, byMessageId);
+            var parent = parentId.HasValue
+                ? messages.FirstOrDefault(x => x.Id == parentId.Value)
+                : null;
+            return $"{index}|{GetCanonicalMessageIdentity(message)}|" +
+                (parent == null ? "" : GetCanonicalMessageIdentity(parent));
+        }));
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     }
 
     private static bool HasThreadRelationship(
@@ -279,34 +406,140 @@ public static class ThreadBuilder
         return false;
     }
 
+    private static List<List<ThreadMessage>> BuildReplyPaths(
+        List<ThreadMessage> component,
+        Dictionary<string, ThreadMessage> byMessageId)
+    {
+        var componentIds = component.Select(x => x.Id).ToHashSet();
+        var parentByMessage = component.ToDictionary(
+            x => x.Id,
+            x => ResolveParent(x, componentIds, byMessageId));
+        var childrenByMessage = component.ToDictionary(
+            x => x.Id,
+            _ => new List<ThreadMessage>());
+
+        foreach (var message in component)
+        {
+            var parentId = parentByMessage[message.Id];
+
+            if (parentId.HasValue && childrenByMessage.TryGetValue(parentId.Value, out var children))
+                children.Add(message);
+        }
+
+        foreach (var children in childrenByMessage.Values)
+            children.Sort(CompareMessages);
+
+        var roots = component
+            .Where(x => !parentByMessage[x.Id].HasValue)
+            .OrderBy(GetDate)
+            .ThenBy(GetCanonicalMessageIdentity, StringComparer.Ordinal)
+            .ToList();
+        var paths = new List<List<ThreadMessage>>();
+
+        foreach (var root in roots)
+            AddReplyPaths(root, childrenByMessage, [], paths, new HashSet<long>());
+
+        return paths;
+    }
+
+    private static long? ResolveParent(
+        ThreadMessage message,
+        HashSet<long> componentIds,
+        Dictionary<string, ThreadMessage> byMessageId)
+    {
+        if (!string.IsNullOrWhiteSpace(message.InReplyTo))
+        {
+            var key = NormalizeMessageId(message.InReplyTo);
+
+            if (byMessageId.TryGetValue(key, out var parent) &&
+                parent.Id != message.Id && componentIds.Contains(parent.Id))
+                return parent.Id;
+        }
+
+        if (!string.IsNullOrWhiteSpace(message.References))
+        {
+            var references = ParseReferences(message.References);
+
+            for (var i = references.Count - 1; i >= 0; i--)
+            {
+                if (byMessageId.TryGetValue(references[i], out var parent) &&
+                    parent.Id != message.Id && componentIds.Contains(parent.Id))
+                    return parent.Id;
+            }
+        }
+
+        return null;
+    }
+
+    private static void AddReplyPaths(
+        ThreadMessage message,
+        Dictionary<long, List<ThreadMessage>> childrenByMessage,
+        List<ThreadMessage> ancestors,
+        List<List<ThreadMessage>> paths,
+        HashSet<long> activePath)
+    {
+        if (!activePath.Add(message.Id)) return;
+
+        var path = new List<ThreadMessage>(ancestors) { message };
+        var children = childrenByMessage[message.Id]
+            .Where(x => !activePath.Contains(x.Id))
+            .ToList();
+
+        if (children.Count == 0)
+            paths.Add(path);
+        else
+            foreach (var child in children)
+                AddReplyPaths(child, childrenByMessage, path, paths, activePath);
+
+        activePath.Remove(message.Id);
+    }
+
+    private static int CompareMessages(
+        ThreadMessage left,
+        ThreadMessage right)
+    {
+        var dateComparison = GetDate(left).CompareTo(GetDate(right));
+
+        return dateComparison != 0
+            ? dateComparison
+            : StringComparer.Ordinal.Compare(GetCanonicalMessageIdentity(left), GetCanonicalMessageIdentity(right));
+    }
+
     private static string BuildThreadKey(
         List<ThreadMessage> messages)
     {
-        /*
-         * ProviderThreadId is optional.
-         *
-         * If we eventually restore it, use it as a useful
-         * stable identifier, but it is NOT required for
-         * thread reconstruction.
-         */
-        var providerThreadId = messages
-            .Select(x => x.ProviderThreadId)
-            .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+        var leaf = messages.Last();
+        var lineage = string.IsNullOrWhiteSpace(leaf.References)
+            ? []
+            : ParseReferences(leaf.References);
 
-        if (!string.IsNullOrWhiteSpace(providerThreadId)) return $"gmail:{providerThreadId}";
+        if (!string.IsNullOrWhiteSpace(leaf.InReplyTo))
+        {
+            var parent = NormalizeMessageId(leaf.InReplyTo);
 
-        /*
-         * Otherwise use the Message-ID of the root/oldest
-         * message as the logical thread key.
-         */
-        var first = messages
-            .OrderBy(GetDate)
-            .ThenBy(x => x.Id)
-            .First();
+            if (parent.Length > 0 && !lineage.Contains(parent, StringComparer.Ordinal))
+                lineage.Add(parent);
+        }
 
-        if (!string.IsNullOrWhiteSpace(first.MessageId)) return $"message:{NormalizeMessageId(first.MessageId)}";
+        lineage.Add(GetCanonicalMessageIdentity(leaf));
 
-        return $"message:{first.Id}";
+        return "path:" + string.Join("->", lineage.Select(AsThreadKeyPart));
+    }
+
+    private static string AsThreadKeyPart(
+        string identity) =>
+        identity.StartsWith("message:", StringComparison.Ordinal) ||
+        identity.StartsWith("provider:", StringComparison.Ordinal)
+            ? identity
+            : $"message:{identity}";
+
+    private static string GetCanonicalMessageIdentity(
+        ThreadMessage message)
+    {
+        if (!string.IsNullOrWhiteSpace(message.MessageId))
+            return $"message:{NormalizeMessageId(message.MessageId)}";
+
+        return $"provider:{message.ProviderMessageId.ToLowerInvariant()}";
     }
 
     private static List<string> ParseReferences(

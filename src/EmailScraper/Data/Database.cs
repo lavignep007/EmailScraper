@@ -108,12 +108,18 @@ public static class Database
 
         ThreadKey TEXT NOT NULL UNIQUE,
 
+        ProviderThreadId TEXT,
+
         Subject TEXT,
 
         FirstDate TEXT,
         LastDate TEXT,
 
-        Name TEXT
+        Name TEXT,
+
+        RevisionHash TEXT NOT NULL,
+        PdfRevisionHash TEXT,
+        State TEXT NOT NULL DEFAULT 'Active'
     );
 
     CREATE TABLE IF NOT EXISTS MessageThreads
@@ -149,6 +155,45 @@ public static class Database
             ParentMessageId
         )
         REFERENCES Messages(Id)
+    );
+
+    CREATE TABLE IF NOT EXISTS ThreadRelations
+    (
+        ParentThreadId INTEGER NOT NULL,
+        ChildThreadId INTEGER NOT NULL,
+        RelationType TEXT NOT NULL,
+        CreatedUtc TEXT NOT NULL,
+
+        PRIMARY KEY (ParentThreadId, ChildThreadId, RelationType),
+
+        FOREIGN KEY (ParentThreadId) REFERENCES Threads(Id),
+        FOREIGN KEY (ChildThreadId) REFERENCES Threads(Id)
+    );
+
+    CREATE TABLE IF NOT EXISTS ThreadRevisions
+    (
+        ThreadId INTEGER NOT NULL,
+        RevisionHash TEXT NOT NULL,
+        ThreadKey TEXT NOT NULL,
+        CreatedUtc TEXT NOT NULL,
+
+        PRIMARY KEY (ThreadId, RevisionHash),
+        FOREIGN KEY (ThreadId) REFERENCES Threads(Id)
+    );
+
+    CREATE TABLE IF NOT EXISTS ThreadRevisionMessages
+    (
+        ThreadId INTEGER NOT NULL,
+        RevisionHash TEXT NOT NULL,
+        MessageId INTEGER NOT NULL,
+        ParentMessageId INTEGER,
+        SortOrder INTEGER NOT NULL,
+
+        PRIMARY KEY (ThreadId, RevisionHash, MessageId),
+        FOREIGN KEY (ThreadId, RevisionHash)
+            REFERENCES ThreadRevisions(ThreadId, RevisionHash),
+        FOREIGN KEY (MessageId) REFERENCES Messages(Id),
+        FOREIGN KEY (ParentMessageId) REFERENCES Messages(Id)
     );
 
         CREATE TABLE IF NOT EXISTS SearchDocuments
@@ -701,25 +746,34 @@ public static class Database
         INSERT INTO Threads
         (
             ThreadKey,
+            ProviderThreadId,
             Subject,
             FirstDate,
             LastDate,
-            Name
+            Name,
+            RevisionHash,
+            State
         )
         VALUES
         (
             $threadKey,
+            $providerThreadId,
             $subject,
             $firstDate,
             $lastDate,
-            $name
+            $name,
+            $revisionHash,
+            'Active'
         )
         ON CONFLICT(ThreadKey)
         DO UPDATE SET
+            ProviderThreadId = excluded.ProviderThreadId,
             Subject = excluded.Subject,
             FirstDate = excluded.FirstDate,
             LastDate = excluded.LastDate,
-            Name = excluded.Name;
+            Name = excluded.Name,
+            RevisionHash = excluded.RevisionHash,
+            State = 'Active';
 
         SELECT Id
         FROM Threads
@@ -727,14 +781,156 @@ public static class Database
         """;
 
         command.Parameters.AddWithValue("$threadKey", thread.ThreadKey);
+        command.Parameters.AddWithValue("$providerThreadId", (object?)thread.ProviderThreadId ?? DBNull.Value);
         command.Parameters.AddWithValue("$subject", (object?)thread.Subject ?? DBNull.Value);
         command.Parameters.AddWithValue("$firstDate", (object?)thread.FirstDate ?? DBNull.Value);
         command.Parameters.AddWithValue("$lastDate", (object?)thread.LastDate ?? DBNull.Value);
         command.Parameters.AddWithValue("$name", (object?)thread.Name ?? DBNull.Value);
+        command.Parameters.AddWithValue("$revisionHash", thread.RevisionHash);
 
         var result = await command.ExecuteScalarAsync();
 
         return Convert.ToInt64(result);
+    }
+
+    public static async Task UpdateThreadAsync(
+        string databasePath,
+        ThreadRecord thread)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        UPDATE Threads
+        SET ThreadKey = $threadKey,
+            ProviderThreadId = $providerThreadId,
+            Subject = $subject,
+            FirstDate = $firstDate,
+            LastDate = $lastDate,
+            RevisionHash = $revisionHash
+            ,State = 'Active'
+        WHERE Id = $id;
+        """;
+        command.Parameters.AddWithValue("$id", thread.Id);
+        command.Parameters.AddWithValue("$threadKey", thread.ThreadKey);
+        command.Parameters.AddWithValue("$providerThreadId", (object?)thread.ProviderThreadId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$subject", (object?)thread.Subject ?? DBNull.Value);
+        command.Parameters.AddWithValue("$firstDate", (object?)thread.FirstDate ?? DBNull.Value);
+        command.Parameters.AddWithValue("$lastDate", (object?)thread.LastDate ?? DBNull.Value);
+        command.Parameters.AddWithValue("$revisionHash", thread.RevisionHash);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public static async Task<List<ExistingThread>> GetExistingThreadsAsync(string databasePath)
+    {
+        var result = new List<ExistingThread>();
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        SELECT t.Id, t.ThreadKey, t.RevisionHash, mt.MessageId
+        FROM Threads t
+        LEFT JOIN MessageThreads mt ON mt.ThreadId = t.Id
+        WHERE t.State = 'Active'
+        ORDER BY t.Id, mt.SortOrder;
+        """;
+        await using var reader = await command.ExecuteReaderAsync();
+        ExistingThread? current = null;
+        while (await reader.ReadAsync())
+        {
+            var id = reader.GetInt64(0);
+            if (current?.Id != id)
+            {
+                current = new ExistingThread
+                {
+                    Id = id,
+                    ThreadKey = reader.GetString(1),
+                    RevisionHash = reader.GetString(2)
+                };
+                result.Add(current);
+            }
+            if (!reader.IsDBNull(3)) current.MessageIds.Add(reader.GetInt64(3));
+        }
+        return result;
+    }
+
+    public static async Task DeactivateThreadAsync(string databasePath, long threadId)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = "UPDATE Threads SET State = 'Superseded' WHERE Id = $id;";
+        command.Parameters.AddWithValue("$id", threadId);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public static async Task AddThreadRelationAsync(
+        string databasePath, long parentThreadId, long childThreadId, string relationType)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        INSERT OR IGNORE INTO ThreadRelations
+            (ParentThreadId, ChildThreadId, RelationType, CreatedUtc)
+        VALUES ($parent, $child, $type, $createdUtc);
+        """;
+        command.Parameters.AddWithValue("$parent", parentThreadId);
+        command.Parameters.AddWithValue("$child", childThreadId);
+        command.Parameters.AddWithValue("$type", relationType);
+        command.Parameters.AddWithValue("$createdUtc", DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public static async Task SetThreadPdfRevisionAsync(
+        string databasePath, long threadId, string revisionHash)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = "UPDATE Threads SET PdfRevisionHash = $hash WHERE Id = $id;";
+        command.Parameters.AddWithValue("$hash", revisionHash);
+        command.Parameters.AddWithValue("$id", threadId);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public static async Task RecordThreadRevisionAsync(
+        string databasePath,
+        long threadId,
+        string threadKey,
+        string revisionHash)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync();
+
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+        INSERT OR IGNORE INTO ThreadRevisions
+            (ThreadId, RevisionHash, ThreadKey, CreatedUtc)
+        VALUES ($threadId, $revisionHash, $threadKey, $createdUtc);
+        """;
+        command.Parameters.AddWithValue("$threadId", threadId);
+        command.Parameters.AddWithValue("$revisionHash", revisionHash);
+        command.Parameters.AddWithValue("$threadKey", threadKey);
+        command.Parameters.AddWithValue("$createdUtc", DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync();
+
+        command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+        INSERT OR IGNORE INTO ThreadRevisionMessages
+            (ThreadId, RevisionHash, MessageId, ParentMessageId, SortOrder)
+        SELECT ThreadId, $revisionHash, MessageId, ParentMessageId, SortOrder
+        FROM MessageThreads
+        WHERE ThreadId = $threadId;
+        """;
+        command.Parameters.AddWithValue("$threadId", threadId);
+        command.Parameters.AddWithValue("$revisionHash", revisionHash);
+        await command.ExecuteNonQueryAsync();
+
+        await transaction.CommitAsync();
     }
 
     public static async Task DeleteEmptyThreadsAsync(
@@ -1031,11 +1227,15 @@ public static class Database
         SELECT
             Id,
             ThreadKey,
+            ProviderThreadId,
             Name,
             Subject,
             FirstDate,
             LastDate
+            ,RevisionHash
+            ,PdfRevisionHash
         FROM Threads
+        WHERE State = 'Active'
         ORDER BY
             FirstDate,
             Id;
@@ -1049,10 +1249,13 @@ public static class Database
             {
                 Id = reader.GetInt64(0),
                 ThreadKey = reader.GetString(1),
-                Name = reader.IsDBNull(2) ? null : reader.GetString(2),
-                Subject = reader.IsDBNull(3) ? null : reader.GetString(3),
-                FirstDate = reader.IsDBNull(4) ? null : reader.GetString(4),
-                LastDate = reader.IsDBNull(5) ? null : reader.GetString(5)
+                ProviderThreadId = reader.IsDBNull(2) ? null : reader.GetString(2),
+                Name = reader.IsDBNull(3) ? null : reader.GetString(3),
+                Subject = reader.IsDBNull(4) ? null : reader.GetString(4),
+                FirstDate = reader.IsDBNull(5) ? null : reader.GetString(5),
+                LastDate = reader.IsDBNull(6) ? null : reader.GetString(6),
+                RevisionHash = reader.GetString(7),
+                PdfRevisionHash = reader.IsDBNull(8) ? null : reader.GetString(8)
             });
         }
 
