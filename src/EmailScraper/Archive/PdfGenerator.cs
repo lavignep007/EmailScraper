@@ -323,6 +323,11 @@ public static class PdfGenerator
                 column.Item()
                     .Text($"Messages: {messages.Count}");
 
+                if (thread.IsPartial)
+                    column.Item()
+                        .Text($"Partial thread: {thread.MissingAncestorCount} referenced ancestor(s) unavailable")
+                        .Bold();
+
                 column.Item()
                     .Text($"First: {thread.FirstDate}");
 

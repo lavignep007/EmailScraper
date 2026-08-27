@@ -11,5 +11,6 @@ public sealed class AppConfigTests
         config.ArchivePath.Should().Be("./archive");
         config.DatabasePath.Should().Be("./archive/archive.db");
         config.EmailAddresses.Should().BeEmpty();
+        config.PerspectiveArchives.Should().BeEmpty();
     }
 }

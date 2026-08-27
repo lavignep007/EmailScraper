@@ -1,6 +1,6 @@
-﻿namespace EmailScraper.Models;
+namespace EmailScraper.Models;
 
-public sealed class MessageRecord
+public sealed class ProjectionMessage
 {
     public string ProviderMessageId { get; set; } = "";
 

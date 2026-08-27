@@ -33,6 +33,7 @@ Console.WriteLine(" Email Scraper - V1.1");
 Console.WriteLine("==========================================");
 Console.WriteLine();
 Console.WriteLine($"Provider: {emailProvider.Name}");
+Console.WriteLine($"Complete archive: {Path.GetFullPath(config.ArchivePath)}");
 Console.WriteLine("Tracking:");
 
 foreach (var address in config.EmailAddresses)
@@ -72,6 +73,19 @@ else
 {
     Console.WriteLine();
     Console.WriteLine("No new messages downloaded. Archive processing is already up to date.");
+}
+
+await emailProvider.RefreshDeliveryStatesAsync();
+
+if (config.PerspectiveArchives.Count > 0)
+{
+    Console.WriteLine("Perspective archives:");
+    foreach (var perspective in config.PerspectiveArchives)
+        Console.WriteLine($"  {perspective.Name}: {Path.GetFullPath(perspective.ArchivePath)}");
+
+    foreach (var perspective in config.PerspectiveArchives)
+        await PerspectiveArchiveBuilder.BuildAsync(
+            config.DatabasePath, config.ArchivePath, perspective);
 }
 
 while (true)

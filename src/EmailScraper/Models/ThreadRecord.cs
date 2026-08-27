@@ -19,4 +19,8 @@ public sealed class ThreadRecord
     public string RevisionHash { get; set; } = "";
 
     public string? PdfRevisionHash { get; set; }
+
+    public bool IsPartial { get; set; }
+
+    public int MissingAncestorCount { get; set; }
 }

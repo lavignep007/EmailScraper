@@ -9,4 +9,6 @@ public sealed class AppConfig
     public string DatabasePath { get; set; } = "./archive/archive.db";
 
     public List<string> EmailAddresses { get; set; } = [];
+
+    public List<PerspectiveArchiveConfig> PerspectiveArchives { get; set; } = [];
 }

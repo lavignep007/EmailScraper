@@ -128,9 +128,9 @@ Threads are reconstructed from standard email relationship headers, including:
 - `In-Reply-To`
 - `References`
 
-The reconstructed structure is a reply graph. Each active logical thread is a root-to-leaf path containing at least two locally available messages. Branches may occur at any depth, and shared ancestors may therefore belong to multiple logical threads.
+The reconstructed structure is a reply graph. Each active logical thread is normally a root-to-leaf path containing at least two locally available messages. Branches may occur at any depth, and shared ancestors may therefore belong to multiple logical threads.
 
-A genuinely standalone message does not create a thread or thread PDF, but it still receives an individual-message PDF and a search document.
+A genuinely standalone message does not create a thread or thread PDF, but it still receives an individual-message PDF and a search document. A locally standalone reply that declares unavailable ancestors through `In-Reply-To` or `References` does create a partial thread; `IsPartial` and `MissingAncestorCount` make that incompleteness explicit.
 
 Each reconstructed thread has a unique `ThreadKey` derived from the leaf message's declared RFC lineage (`References`, `In-Reply-To` and its own `Message-ID`). A missing intermediate message can remain represented in this declared lineage even though no local `Messages` row is manufactured for it.
 
@@ -234,11 +234,25 @@ Configuration includes the provider, archive output location, database location 
   "DatabasePath": "./archive/archive.db",
   "EmailAddresses": [
     "person@example.com"
+  ],
+  "PerspectiveArchives": [
+    {
+      "Name": "Moriarty",
+      "ArchivePath": "./moriarty-archive",
+      "EmailAddresses": [
+        "opponent@example.com",
+        "opponent.alias@example.com"
+      ]
+    }
   ]
 }
 ```
 
 `EmailAddresses` controls the Gmail query and the subsequent relevance check against sender and recipient headers.
+
+`PerspectiveArchives` is optional. Each profile creates an independently rebuilt archive containing only messages where one of its addresses appears as an exact mailbox in `From`, `To`, `Cc` or visible `Bcc`. Multiple addresses in one profile are treated as aliases of the same perspective. On every run, Gmail's native `in:drafts` and `in:scheduled` searches are reconciled into the provider-neutral `Messages.IsUnsent` field. Unsent messages remain in the complete source archive, with their state recorded, but are excluded from every perspective archive.
+
+Perspective output must be separate from, and not nested inside, the complete source archive. Retained EML files are copied into a staging archive; attachments, threads, revisions, PDFs and search data are rebuilt exclusively from those retained messages. The completed staging archive replaces the previous perspective only after successful generation. A manifest fingerprint prevents unnecessary rebuilding when neither the retained evidence nor address set changed.
 
 Secrets and authentication credentials should not be committed to source control.
 

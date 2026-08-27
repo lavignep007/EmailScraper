@@ -126,7 +126,7 @@ public static class ThreadBuilder
 
         var threadGroups = connectedComponents
             .SelectMany(x => BuildReplyPaths(x, byMessageId))
-            .Where(x => x.Count > 1)
+            .Where(x => x.Count > 1 || HasDeclaredThreadRelationship(x[0]))
             .OrderBy(x => x.Min(GetDate))
             .ThenBy(BuildThreadKey, StringComparer.Ordinal)
             .ToList();
@@ -219,6 +219,7 @@ public static class ThreadBuilder
         var first = ordered.First();
         var last = ordered.Last();
         var threadKey = BuildThreadKey(ordered);
+        var missingAncestorCount = GetMissingAncestorCount(ordered, byMessageId);
         var record = new ThreadRecord
         {
             Id = existing?.Id ?? 0,
@@ -231,7 +232,9 @@ public static class ThreadBuilder
             Subject = CleanSubject(first.Subject),
             FirstDate = first.Date,
             LastDate = last.Date,
-            RevisionHash = BuildRevisionHash(ordered, byMessageId)
+            RevisionHash = BuildRevisionHash(ordered, byMessageId),
+            IsPartial = missingAncestorCount > 0,
+            MissingAncestorCount = missingAncestorCount
         };
         long threadId;
 
@@ -404,6 +407,32 @@ public static class ThreadBuilder
         }
 
         return false;
+    }
+
+    private static bool HasDeclaredThreadRelationship(ThreadMessage message) =>
+        !string.IsNullOrWhiteSpace(message.InReplyTo) ||
+        !string.IsNullOrWhiteSpace(message.References);
+
+    private static int GetMissingAncestorCount(
+        IEnumerable<ThreadMessage> messages,
+        Dictionary<string, ThreadMessage> byMessageId)
+    {
+        var missing = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var message in messages)
+        {
+            if (!string.IsNullOrWhiteSpace(message.InReplyTo))
+            {
+                var parent = NormalizeMessageId(message.InReplyTo);
+                if (parent.Length > 0 && !byMessageId.ContainsKey(parent)) missing.Add(parent);
+            }
+
+            if (!string.IsNullOrWhiteSpace(message.References))
+                foreach (var reference in ParseReferences(message.References))
+                    if (!byMessageId.ContainsKey(reference)) missing.Add(reference);
+        }
+
+        return missing.Count;
     }
 
     private static List<List<ThreadMessage>> BuildReplyPaths(

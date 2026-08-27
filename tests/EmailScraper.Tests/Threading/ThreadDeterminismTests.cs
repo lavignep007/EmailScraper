@@ -104,6 +104,30 @@ public sealed class ThreadDeterminismTests
     }
 
     [Fact]
+    public async Task Reply_with_unavailable_ancestors_creates_a_partial_thread()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var reply = Message("provider-z", "<z@example.test>", "<missing-x@example.test>",
+            "2026-01-03T12:00:00+00:00");
+        reply.References = "<missing-a@example.test> <missing-x@example.test>";
+        await InsertAsync(database.Path, [reply]);
+
+        await ThreadBuilder.BuildAsync(database.Path);
+
+        var threads = await ReadThreadsAsync(database.Path);
+        threads.Should().ContainSingle();
+
+        await using var connection = new SqliteConnection($"Data Source={database.Path}");
+        await connection.OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = "SELECT IsPartial, MissingAncestorCount FROM Threads;";
+        await using var reader = await command.ExecuteReaderAsync();
+        (await reader.ReadAsync()).Should().BeTrue();
+        reader.GetBoolean(0).Should().BeTrue();
+        reader.GetInt32(1).Should().Be(2);
+    }
+
+    [Fact]
     public async Task Extending_a_thread_preserves_its_local_id_and_changes_its_revision()
     {
         await using var database = await TestDatabase.CreateAsync();

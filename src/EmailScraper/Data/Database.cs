@@ -39,6 +39,7 @@ public static class Database
         BccAddresses TEXT,
 
         MessageType TEXT NOT NULL DEFAULT 'Email',
+        IsUnsent INTEGER NOT NULL DEFAULT 0,
         ReactionEmoji TEXT,
 
         FilePath TEXT NOT NULL,
@@ -119,6 +120,8 @@ public static class Database
 
         RevisionHash TEXT NOT NULL,
         PdfRevisionHash TEXT,
+        IsPartial INTEGER NOT NULL DEFAULT 0,
+        MissingAncestorCount INTEGER NOT NULL DEFAULT 0,
         State TEXT NOT NULL DEFAULT 'Active'
     );
 
@@ -349,6 +352,7 @@ public static class Database
                 CcAddresses,
                 BccAddresses,
                 MessageType,
+                IsUnsent,
                 ReactionEmoji,
                 FilePath,
                 ImportedUtc
@@ -367,6 +371,7 @@ public static class Database
                 $cc,
                 $bcc,
                 $messageType,
+                $isUnsent,
                 $reactionEmoji,
                 $filePath,
                 $importedUtc
@@ -385,6 +390,7 @@ public static class Database
         command.Parameters.AddWithValue("$cc", (object?)message.Cc ?? DBNull.Value);
         command.Parameters.AddWithValue("$bcc", (object?)message.Bcc ?? DBNull.Value);
         command.Parameters.AddWithValue("$messageType", message.MessageType);
+        command.Parameters.AddWithValue("$isUnsent", message.IsUnsent);
         command.Parameters.AddWithValue("$reactionEmoji", (object?)message.ReactionEmoji ?? DBNull.Value);
         command.Parameters.AddWithValue("$filePath", message.FilePath);
         command.Parameters.AddWithValue("$importedUtc", DateTimeOffset.UtcNow.ToString("O"));
@@ -713,6 +719,145 @@ public static class Database
         return result;
     }
 
+    public static async Task<List<ProjectionMessage>> GetMessagesForProjectionAsync(
+        string databasePath)
+    {
+        var result = new List<ProjectionMessage>();
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+        SELECT
+            ProviderMessageId,
+            ProviderThreadId,
+            MessageId,
+            InReplyTo,
+            ReferencesHeader,
+            Date,
+            Subject,
+            FromAddress,
+            ToAddresses,
+            CcAddresses,
+            BccAddresses,
+            MessageType,
+            IsUnsent,
+            ReactionEmoji,
+            FilePath
+        FROM Messages
+        ORDER BY ProviderMessageId;
+        """;
+
+        await using var reader = await command.ExecuteReaderAsync();
+
+        while (await reader.ReadAsync())
+        {
+            result.Add(new ProjectionMessage
+            {
+                ProviderMessageId = reader.GetString(0),
+                ProviderThreadId = reader.IsDBNull(1) ? null : reader.GetString(1),
+                MessageId = reader.IsDBNull(2) ? null : reader.GetString(2),
+                InReplyTo = reader.IsDBNull(3) ? null : reader.GetString(3),
+                References = reader.IsDBNull(4) ? null : reader.GetString(4),
+                Date = reader.IsDBNull(5) ? null : reader.GetString(5),
+                Subject = reader.IsDBNull(6) ? null : reader.GetString(6),
+                From = reader.IsDBNull(7) ? null : reader.GetString(7),
+                To = reader.IsDBNull(8) ? null : reader.GetString(8),
+                Cc = reader.IsDBNull(9) ? null : reader.GetString(9),
+                Bcc = reader.IsDBNull(10) ? null : reader.GetString(10),
+                MessageType = reader.GetString(11),
+                IsUnsent = reader.GetBoolean(12),
+                ReactionEmoji = reader.IsDBNull(13) ? null : reader.GetString(13),
+                FilePath = reader.GetString(14)
+            });
+        }
+
+        return result;
+    }
+
+    public static async Task RebaseArchiveFilePathsAsync(
+        string databasePath,
+        string oldArchivePath,
+        string newArchivePath)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync();
+
+        foreach (var table in new[] { "Messages", "Attachments" })
+        {
+            var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = $"""
+            UPDATE {table}
+            SET FilePath = $newRoot || SUBSTR(FilePath, LENGTH($oldRoot) + 1)
+            WHERE FilePath = $oldRoot
+               OR FilePath LIKE $oldRoot || $separator || '%';
+            """;
+            command.Parameters.AddWithValue("$oldRoot", Path.GetFullPath(oldArchivePath));
+            command.Parameters.AddWithValue("$newRoot", Path.GetFullPath(newArchivePath));
+            command.Parameters.AddWithValue("$separator", Path.DirectorySeparatorChar.ToString());
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await transaction.CommitAsync();
+    }
+
+    public static async Task<DeliveryStateChanges> ReconcileUnsentMessagesAsync(
+        string databasePath,
+        IReadOnlySet<string> unsentProviderMessageIds)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync();
+
+        var archivedIds = new HashSet<string>(StringComparer.Ordinal);
+        var previouslyUnsentIds = new HashSet<string>(StringComparer.Ordinal);
+        var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = "SELECT ProviderMessageId, IsUnsent FROM Messages;";
+
+        await using (var reader = await read.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                var id = reader.GetString(0);
+                archivedIds.Add(id);
+                if (reader.GetBoolean(1)) previouslyUnsentIds.Add(id);
+            }
+        }
+
+        var currentUnsentIds = unsentProviderMessageIds
+            .Where(archivedIds.Contains)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var clear = connection.CreateCommand();
+        clear.Transaction = transaction;
+        clear.CommandText = "UPDATE Messages SET IsUnsent = 0 WHERE IsUnsent <> 0;";
+        await clear.ExecuteNonQueryAsync();
+
+        var mark = connection.CreateCommand();
+        mark.Transaction = transaction;
+        mark.CommandText = """
+        UPDATE Messages
+        SET IsUnsent = 1
+        WHERE ProviderMessageId = $providerMessageId;
+        """;
+        var idParameter = mark.Parameters.Add("$providerMessageId", SqliteType.Text);
+
+        foreach (var id in currentUnsentIds)
+        {
+            idParameter.Value = id;
+            await mark.ExecuteNonQueryAsync();
+        }
+
+        await transaction.CommitAsync();
+
+        return new DeliveryStateChanges(
+            currentUnsentIds.Count,
+            currentUnsentIds.Except(previouslyUnsentIds).Count(),
+            previouslyUnsentIds.Except(currentUnsentIds).Count());
+    }
+
     public static async Task ClearThreadsAsync(
         string databasePath)
     {
@@ -752,6 +897,8 @@ public static class Database
             LastDate,
             Name,
             RevisionHash,
+            IsPartial,
+            MissingAncestorCount,
             State
         )
         VALUES
@@ -763,6 +910,8 @@ public static class Database
             $lastDate,
             $name,
             $revisionHash,
+            $isPartial,
+            $missingAncestorCount,
             'Active'
         )
         ON CONFLICT(ThreadKey)
@@ -773,6 +922,8 @@ public static class Database
             LastDate = excluded.LastDate,
             Name = excluded.Name,
             RevisionHash = excluded.RevisionHash,
+            IsPartial = excluded.IsPartial,
+            MissingAncestorCount = excluded.MissingAncestorCount,
             State = 'Active';
 
         SELECT Id
@@ -787,6 +938,8 @@ public static class Database
         command.Parameters.AddWithValue("$lastDate", (object?)thread.LastDate ?? DBNull.Value);
         command.Parameters.AddWithValue("$name", (object?)thread.Name ?? DBNull.Value);
         command.Parameters.AddWithValue("$revisionHash", thread.RevisionHash);
+        command.Parameters.AddWithValue("$isPartial", thread.IsPartial);
+        command.Parameters.AddWithValue("$missingAncestorCount", thread.MissingAncestorCount);
 
         var result = await command.ExecuteScalarAsync();
 
@@ -807,8 +960,10 @@ public static class Database
             Subject = $subject,
             FirstDate = $firstDate,
             LastDate = $lastDate,
-            RevisionHash = $revisionHash
-            ,State = 'Active'
+            RevisionHash = $revisionHash,
+            IsPartial = $isPartial,
+            MissingAncestorCount = $missingAncestorCount,
+            State = 'Active'
         WHERE Id = $id;
         """;
         command.Parameters.AddWithValue("$id", thread.Id);
@@ -818,6 +973,8 @@ public static class Database
         command.Parameters.AddWithValue("$firstDate", (object?)thread.FirstDate ?? DBNull.Value);
         command.Parameters.AddWithValue("$lastDate", (object?)thread.LastDate ?? DBNull.Value);
         command.Parameters.AddWithValue("$revisionHash", thread.RevisionHash);
+        command.Parameters.AddWithValue("$isPartial", thread.IsPartial);
+        command.Parameters.AddWithValue("$missingAncestorCount", thread.MissingAncestorCount);
         await command.ExecuteNonQueryAsync();
     }
 
@@ -1282,6 +1439,8 @@ public static class Database
             LastDate
             ,RevisionHash
             ,PdfRevisionHash
+            ,IsPartial
+            ,MissingAncestorCount
         FROM Threads
         WHERE State = 'Active'
         ORDER BY
@@ -1303,7 +1462,9 @@ public static class Database
                 FirstDate = reader.IsDBNull(5) ? null : reader.GetString(5),
                 LastDate = reader.IsDBNull(6) ? null : reader.GetString(6),
                 RevisionHash = reader.GetString(7),
-                PdfRevisionHash = reader.IsDBNull(8) ? null : reader.GetString(8)
+                PdfRevisionHash = reader.IsDBNull(8) ? null : reader.GetString(8),
+                IsPartial = reader.GetBoolean(9),
+                MissingAncestorCount = reader.GetInt32(10)
             });
         }
 

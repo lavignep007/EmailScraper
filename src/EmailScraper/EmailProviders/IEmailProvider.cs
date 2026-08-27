@@ -12,5 +12,7 @@ public interface IEmailProvider
 
     Task RepairCorruptEmlFilesAsync();
 
+    Task RefreshDeliveryStatesAsync();
+
     Task ValidateAsync();
 }

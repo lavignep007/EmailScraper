@@ -262,6 +262,51 @@ public sealed class GmailEmailProvider : IEmailProvider
     public Task ValidateAsync() =>
         ArchiveValidator.ValidateAsync(gmail, config.DatabasePath, BuildQuery(config.EmailAddresses));
 
+    public async Task RefreshDeliveryStatesAsync()
+    {
+        Console.WriteLine();
+        Console.WriteLine("Refreshing draft and scheduled-message state from Gmail...");
+
+        var unsentIds = new HashSet<string>(StringComparer.Ordinal);
+        await AddMatchingMessageIdsAsync("in:drafts", unsentIds);
+        await AddMatchingMessageIdsAsync("in:scheduled", unsentIds);
+
+        var changes = await Database.ReconcileUnsentMessagesAsync(
+            config.DatabasePath,
+            unsentIds);
+
+        Console.WriteLine($"Currently unsent:       {changes.CurrentlyUnsent:N0}");
+        Console.WriteLine($"Newly marked unsent:    {changes.NewlyUnsent:N0}");
+        Console.WriteLine($"Newly marked delivered: {changes.NewlyDelivered:N0}");
+    }
+
+    private async Task AddMatchingMessageIdsAsync(
+        string query,
+        ISet<string> destination)
+    {
+        string? pageToken = null;
+
+        do
+        {
+            var request = gmail.Users.Messages.List("me");
+            request.Q = query;
+            request.IncludeSpamTrash = true;
+            request.MaxResults = 500;
+            request.PageToken = pageToken;
+
+            var response = await request.ExecuteAsync();
+            if (response.Messages is not null)
+            {
+                foreach (var message in response.Messages)
+                    if (!string.IsNullOrWhiteSpace(message.Id))
+                        destination.Add(message.Id);
+            }
+
+            pageToken = response.NextPageToken;
+        }
+        while (!string.IsNullOrWhiteSpace(pageToken));
+    }
+
     public async Task RepairCorruptEmlFilesAsync()
     {
         Console.WriteLine();
@@ -375,6 +420,7 @@ public sealed class GmailEmailProvider : IEmailProvider
             Cc = cc,
             Bcc = bcc,
             MessageType = messageType,
+            IsUnsent = IsUnsent(message.LabelIds),
             ReactionEmoji = reactionEmoji,
             FilePath = filePath
         });
@@ -428,6 +474,11 @@ public sealed class GmailEmailProvider : IEmailProvider
         Encoding.UTF8.GetString(raw).Contains(
             "text/vnd.google.email-reaction+json",
             StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsUnsent(IEnumerable<string>? labelIds) =>
+        labelIds?.Any(label =>
+            string.Equals(label, "DRAFT", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(label, "SCHEDULED", StringComparison.OrdinalIgnoreCase)) == true;
 
     private static string? TryExtractReactionEmoji(byte[] raw)
     {
