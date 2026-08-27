@@ -6,14 +6,15 @@ It retrieves messages from Gmail, preserves the original email content, extracts
 
 The application supports both full archive creation and incremental synchronization.
 
-> **Current version:** 0.1.0  
+> **Current version:** 0.2.0
+>
 > **Status:** Early development
 
 ## Features
 
 EmailScraper currently supports:
 
-- Full Gmail mailbox extraction
+- Full and incremental Gmail extraction scoped to configured addresses
 - Incremental synchronization using Gmail history
 - Original message preservation as EML files
 - MIME parsing
@@ -28,6 +29,10 @@ EmailScraper currently supports:
 - Incremental updates without re-downloading existing messages unnecessarily
 - Deterministic branching thread reconstruction with revision history
 - Revision-aware thread PDF regeneration
+- Independently rebuilt perspective archives for configured participant addresses
+- Provider-state tracking for drafts and scheduled messages
+- Automatic exclusion of unsent messages from perspective archives
+- Explicit identification of partial threads with unavailable ancestors
 
 ## Archive Structure
 
@@ -98,9 +103,18 @@ Branching thread reconstruction
   ├──► Individual message PDFs
   ├──► Revision-aware thread PDFs
   └──► Full-text search index
+  │
+  ▼
+Draft/scheduled-state reconciliation
+  │
+  ▼
+Configured perspective archives
+  ├──► Exact participant filtering
+  ├──► Unsent-message exclusion
+  └──► Independent EML, database, attachment, PDF and search artifacts
 ```
 
-At startup, the application chooses the synchronization mode automatically. A missing synchronization checkpoint triggers a full synchronization; otherwise, an incremental synchronization runs. When messages are downloaded, parsing, thread reconstruction, organization, PDF generation and search indexing run automatically in that order. When nothing is downloaded, the derived pipeline is skipped.
+At startup, the application chooses the synchronization mode automatically. A missing synchronization checkpoint triggers a full synchronization; otherwise, an incremental synchronization runs. When messages are downloaded, parsing, thread reconstruction, organization, PDF generation and search indexing run automatically in that order. When nothing is downloaded, those complete-archive derived stages are skipped. Gmail draft and scheduled state is reconciled on every run. Configured perspective archives are then evaluated and rebuilt only when their retained evidence or address set has changed.
 
 ## Message Identity
 
@@ -248,9 +262,9 @@ Configuration includes the provider, archive output location, database location 
 }
 ```
 
-`EmailAddresses` controls the Gmail query and the subsequent relevance check against sender and recipient headers.
+The top-level `ArchivePath` and `DatabasePath` identify the complete source archive. `EmailAddresses` controls the Gmail query and the subsequent relevance check against sender and recipient headers; it does not define a complete-mailbox export independent of those addresses.
 
-`PerspectiveArchives` is optional. Each profile creates an independently rebuilt archive containing only messages where one of its addresses appears as an exact mailbox in `From`, `To`, `Cc` or visible `Bcc`. Multiple addresses in one profile are treated as aliases of the same perspective. On every run, Gmail's native `in:drafts` and `in:scheduled` searches are reconciled into the provider-neutral `Messages.IsUnsent` field. Unsent messages remain in the complete source archive, with their state recorded, but are excluded from every perspective archive.
+`PerspectiveArchives` is optional. `Name` is a descriptive label used in console reporting and the perspective manifest; it does not control filtering. Each profile's `ArchivePath` identifies its derived output, while its `EmailAddresses` define visibility. A profile contains only messages where one of those addresses appears as an exact mailbox in `From`, `To`, `Cc` or visible `Bcc`. Multiple addresses in one profile are treated as aliases of the same perspective. On every run, Gmail's native `in:drafts` and `in:scheduled` searches are reconciled into the provider-neutral `Messages.IsUnsent` field. Unsent messages remain in the complete source archive, with their state recorded, but are excluded from every perspective archive.
 
 Perspective output must be separate from, and not nested inside, the complete source archive. Retained EML files are copied into a staging archive; attachments, threads, revisions, PDFs and search data are rebuilt exclusively from those retained messages. The completed staging archive replaces the previous perspective only after successful generation. A manifest fingerprint prevents unnecessary rebuilding when neither the retained evidence nor address set changed.
 
@@ -411,13 +425,9 @@ Email Source ──┼── Outlook / Microsoft 365
 
 The parsing, threading, PDF, indexing and validation layers should not need to know which provider supplied a message.
 
-### Perspective archives
-
-Create derived, independently rebuilt archives representing the messages demonstrably visible to configured participant addresses. These projections must retain only visible messages and their referenced attachments while preserving RFC identity and partial-thread evidence.
-
 ## Development Status
 
-Version `0.1.x` represents the first functional archival implementation.
+Version `0.2.x` adds independently rebuilt perspective archives, unsent-message exclusion and explicit partial-thread evidence to the archival implementation.
 
 The project currently prioritizes correctness, reproducibility and validation over API stability or polished user experience.
 
