@@ -8,10 +8,7 @@ namespace EmailScraper.Validation;
 
 public static class ArchiveValidator
 {
-    public static async Task ValidateAsync(
-        GmailService gmail, 
-        string databasePath,
-        string gmailQuery)
+    public static async Task ValidateAsync(string databasePath)
     {
         Console.WriteLine();
         Console.WriteLine("==========================================");
@@ -172,7 +169,7 @@ public static class ArchiveValidator
          * ====================================================
          * Duplicate provider message IDs
          *
-         * Should always be zero because ProviderMessageId is UNIQUE,
+         * Should always be zero because the source/provider identity is UNIQUE,
          * but validation should still prove it.
          * ====================================================
          */
@@ -183,9 +180,9 @@ public static class ArchiveValidator
                 SELECT COUNT(*)
                 FROM
                 (
-                    SELECT ProviderMessageId
+                    SELECT SourceKey, ProviderMessageId
                     FROM Messages
-                    GROUP BY ProviderMessageId
+                    GROUP BY SourceKey, ProviderMessageId
                     HAVING COUNT(*) > 1
                 );
                 """);
@@ -279,70 +276,36 @@ public static class ArchiveValidator
 
         Console.WriteLine();
 
-        /*
-         * ====================================================
-         * Gmail reconciliation
-         * ====================================================
-         */
-
-        var gmailReport = await ReconcileWithGmailAsync(gmail, databasePath, gmailQuery);
+        Console.WriteLine(report.Errors == 0
+            ? "ARCHIVE STRUCTURAL VALIDATION PASSED"
+            : "ARCHIVE STRUCTURAL VALIDATION FAILED");
 
         Console.WriteLine();
-        Console.WriteLine("==========================================");
-        Console.WriteLine(" GMAIL RECONCILIATION");
-        Console.WriteLine("==========================================");
-        Console.WriteLine();
+    }
 
-        Console.WriteLine($"Gmail matching messages:   {gmailReport.GmailMessages:N0}");
-        Console.WriteLine($"Local archived messages:   {gmailReport.LocalMessages:N0}");
-        Console.WriteLine($"Missing locally:           {gmailReport.MissingLocally.Count:N0}");
-        Console.WriteLine($"Extra locally:             {gmailReport.ExtraLocally.Count:N0}");
+    public static async Task ValidateGmailSourceAsync(
+        GmailService gmail,
+        string databasePath,
+        string sourceKey,
+        string gmailQuery)
+    {
+        var gmailReport = await ReconcileWithGmailAsync(
+            gmail, databasePath, sourceKey, gmailQuery);
 
         Console.WriteLine();
+        Console.WriteLine($"GMAIL RECONCILIATION - {sourceKey}");
+        Console.WriteLine($"Gmail matching messages: {gmailReport.GmailMessages:N0}");
+        Console.WriteLine($"Local archived messages: {gmailReport.LocalMessages:N0}");
+        Console.WriteLine($"Missing locally:         {gmailReport.MissingLocally.Count:N0}");
+        Console.WriteLine($"Extra locally:           {gmailReport.ExtraLocally.Count:N0}");
 
         foreach (var gmailId in gmailReport.MissingLocally)
-        {
             Console.WriteLine($"MISSING LOCAL: {gmailId}");
-        }
-
         foreach (var gmailId in gmailReport.ExtraLocally)
-        {
             Console.WriteLine($"EXTRA LOCAL: {gmailId}");
-        }
 
         if (gmailReport.ExtraLocally.Count > 0)
-        {
-            Console.WriteLine();
-            Console.WriteLine("Diagnosing extra local messages...");
-
             await DiagnoseExtraMessagesAsync(gmail, gmailReport.ExtraLocally);
-        }
-
-        /*
-         * ====================================================
-         * Final verdict
-         * ====================================================
-         */
-
-        var gmailErrors = gmailReport.MissingLocally.Count + gmailReport.ExtraLocally.Count;
-
-        Console.WriteLine();
-
-        Console.WriteLine($"Gmail reconciliation errors: {gmailErrors:N0}");
-
-        Console.WriteLine();
-
-        if (report.Errors == 0 &&
-            gmailErrors == 0)
-        {
-            Console.WriteLine("ARCHIVE VALIDATION PASSED");
-        }
-        else
-        {
-            Console.WriteLine("ARCHIVE VALIDATION FAILED");
-        }
-
-        Console.WriteLine();
     }
 
     private static async Task<int> CountMissingAttachmentFilesAsync(
@@ -359,7 +322,8 @@ public static class ArchiveValidator
         command.CommandText = """
         SELECT
             Id,
-            FilePath
+            FilePath,
+            RelativePath
         FROM Attachments
         ORDER BY Id;
         """;
@@ -370,7 +334,9 @@ public static class ArchiveValidator
         {
             var id = reader.GetInt64(0);
 
-            var filePath = reader.GetString(1);
+            var filePath = reader.IsDBNull(2) ? reader.GetString(1) :
+                Path.Combine(Path.GetDirectoryName(Path.GetFullPath(databasePath))!,
+                    reader.GetString(2).Replace('/', Path.DirectorySeparatorChar));
 
             if (!File.Exists(filePath))
             {
@@ -397,11 +363,12 @@ public static class ArchiveValidator
     public static async Task<GmailReconciliationReport> ReconcileWithGmailAsync(
         GmailService gmail,
         string databasePath,
+        string sourceKey,
         string gmailQuery)
     {
         var gmailIds = await GetMatchingGmailIdsAsync(gmail, gmailQuery);
 
-        var localIds = await Database.GetAllProviderMessageIdsAsync(databasePath);
+        var localIds = await Database.GetAllProviderMessageIdsAsync(databasePath, sourceKey);
 
         var missingLocally = gmailIds
             .Except(localIds)
@@ -435,6 +402,7 @@ public static class ArchiveValidator
             var request = gmail.Users.Messages.List("me");
 
             request.Q = query;
+            request.IncludeSpamTrash = true;
             request.MaxResults = 500;
             request.PageToken = pageToken;
 

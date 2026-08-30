@@ -10,5 +10,13 @@ public sealed class PdfAttachment
 
     public string FilePath { get; set; } = "";
 
+    public string? RelativePath { get; set; }
+
+    public string? OriginalFileName { get; set; }
+
+    public string? ContentDisposition { get; set; }
+
+    public string? PartRole { get; set; }
+
     public bool IsInline { get; set; }
 }

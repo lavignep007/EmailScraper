@@ -169,8 +169,32 @@ public sealed class ThreadDeterminismTests
         threads.Select(x => x.Id).Should().Contain(originalId);
     }
 
+    [Fact]
+    public async Task Same_rfc_message_from_two_sources_is_threaded_once_without_duplicate_branches()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var root = Message(
+            "gmail-root", "<root@example.test>", null, "2026-01-01T12:00:00+00:00");
+        var duplicateRoot = Message(
+            "graph-root", "<root@example.test>", null, "2026-01-01T12:00:00+00:00");
+        duplicateRoot.SourceKey = "second-source";
+        var reply = Message(
+            "gmail-reply", "<reply@example.test>", "<root@example.test>",
+            "2026-01-02T12:00:00+00:00");
+        await InsertAsync(database.Path, [root, duplicateRoot, reply]);
+
+        await ThreadBuilder.BuildAsync(database.Path);
+
+        (await ReadThreadsAsync(database.Path)).Should().ContainSingle();
+        (await ReadPortableMembershipAsync(database.Path)).Should().HaveCount(2);
+        (await Database.ExecuteCountAsync(database.Path, "SELECT COUNT(*) FROM Messages;"))
+            .Should().Be(3, "both original source copies remain archived evidence");
+    }
+
     private static MessageRecord Message(string gmailId, string messageId, string? inReplyTo, string date) => new()
     {
+        SourceKey = "test-source",
+        Provider = "Test",
         ProviderMessageId = gmailId,
         MessageId = messageId,
         InReplyTo = inReplyTo,

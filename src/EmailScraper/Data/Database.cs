@@ -23,15 +23,22 @@ public static class Database
     (
         Id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-        ProviderMessageId TEXT NOT NULL UNIQUE,
+        SourceKey TEXT NOT NULL,
+        Provider TEXT NOT NULL,
+        ProviderMessageId TEXT NOT NULL,
         ProviderThreadId TEXT,
 
         MessageId TEXT,
+        MessageIdRaw TEXT,
+        MimeMessageIdCanonical TEXT,
+        GraphInternetMessageIdRaw TEXT,
         InReplyTo TEXT,
         ReferencesHeader TEXT,
 
         Date TEXT,
         Subject TEXT,
+        SubjectDecodedExact TEXT,
+        SubjectSearchNormalized TEXT,
 
         FromAddress TEXT,
         ToAddresses TEXT,
@@ -49,7 +56,9 @@ public static class Database
         ParserVersion INTEGER,
 
         RelativePath TEXT,
-        DisplayName TEXT
+        DisplayName TEXT,
+
+        UNIQUE(SourceKey, ProviderMessageId)
     );
 
     CREATE TABLE IF NOT EXISTS SyncState
@@ -71,6 +80,7 @@ public static class Database
         Size INTEGER NOT NULL,
 
         FilePath TEXT NOT NULL
+        ,RelativePath TEXT
     );
 
     CREATE TABLE IF NOT EXISTS MessageAttachments
@@ -80,6 +90,11 @@ public static class Database
         AttachmentId INTEGER NOT NULL,
 
         ContentId TEXT,
+
+        OriginalFileName TEXT,
+        ContentDisposition TEXT,
+        ProviderAttachmentId TEXT,
+        PartRole TEXT NOT NULL DEFAULT 'Attachment',
 
         IsInline INTEGER NOT NULL DEFAULT 0,
 
@@ -258,6 +273,10 @@ public static class Database
         ON Messages(ParserVersion);
 
     CREATE INDEX IF NOT EXISTS
+        IX_Messages_SourceKey
+        ON Messages(SourceKey);
+
+    CREATE INDEX IF NOT EXISTS
         IX_MessageThreads_MessageId
         ON MessageThreads(MessageId);
 
@@ -271,6 +290,18 @@ public static class Database
     """;
 
         await command.ExecuteNonQueryAsync();
+
+        // Additive migrations for databases created by earlier scraper versions.
+        await AddColumnIfMissingAsync(connection, "Messages", "MessageIdRaw", "TEXT");
+        await AddColumnIfMissingAsync(connection, "Messages", "MimeMessageIdCanonical", "TEXT");
+        await AddColumnIfMissingAsync(connection, "Messages", "GraphInternetMessageIdRaw", "TEXT");
+        await AddColumnIfMissingAsync(connection, "Messages", "SubjectSearchNormalized", "TEXT");
+        await AddColumnIfMissingAsync(connection, "Messages", "SubjectDecodedExact", "TEXT");
+        await AddColumnIfMissingAsync(connection, "Attachments", "RelativePath", "TEXT");
+        await AddColumnIfMissingAsync(connection, "MessageAttachments", "OriginalFileName", "TEXT");
+        await AddColumnIfMissingAsync(connection, "MessageAttachments", "ContentDisposition", "TEXT");
+        await AddColumnIfMissingAsync(connection, "MessageAttachments", "ProviderAttachmentId", "TEXT");
+        await AddColumnIfMissingAsync(connection, "MessageAttachments", "PartRole", "TEXT NOT NULL DEFAULT 'Attachment'");
     }
 
     private static async Task AddColumnIfMissingAsync(
@@ -306,6 +337,7 @@ public static class Database
 
     public static async Task<bool> MessageExistsAsync(
         string databasePath,
+        string sourceKey,
         string providerMessageId)
     {
         await using var connection = new SqliteConnection($"Data Source={databasePath}");
@@ -317,9 +349,11 @@ public static class Database
         command.CommandText = """
             SELECT COUNT(*)
             FROM Messages
-            WHERE ProviderMessageId = $providerMessageId
+            WHERE SourceKey = $sourceKey
+              AND ProviderMessageId = $providerMessageId
             """;
 
+        command.Parameters.AddWithValue("$sourceKey", sourceKey);
         command.Parameters.AddWithValue("$providerMessageId", providerMessageId);
 
         var result = await command.ExecuteScalarAsync();
@@ -340,13 +374,20 @@ public static class Database
         command.CommandText = """
             INSERT INTO Messages
             (
+                SourceKey,
+                Provider,
                 ProviderMessageId,
                 ProviderThreadId,
                 MessageId,
+                MessageIdRaw,
+                MimeMessageIdCanonical,
+                GraphInternetMessageIdRaw,
                 InReplyTo,
                 ReferencesHeader,
                 Date,
                 Subject,
+                SubjectDecodedExact,
+                SubjectSearchNormalized,
                 FromAddress,
                 ToAddresses,
                 CcAddresses,
@@ -359,13 +400,20 @@ public static class Database
             )
             VALUES
             (
+                $sourceKey,
+                $provider,
                 $providerMessageId,
                 $providerThreadId,
                 $messageId,
+                $messageIdRaw,
+                $mimeMessageIdCanonical,
+                $graphInternetMessageIdRaw,
                 $inReplyTo,
                 $references,
                 $date,
                 $subject,
+                $subjectDecodedExact,
+                $subjectSearchNormalized,
                 $from,
                 $to,
                 $cc,
@@ -378,13 +426,20 @@ public static class Database
             );
             """;
 
+        command.Parameters.AddWithValue("$sourceKey", message.SourceKey);
+        command.Parameters.AddWithValue("$provider", message.Provider);
         command.Parameters.AddWithValue("$providerMessageId", message.ProviderMessageId);
         command.Parameters.AddWithValue("$providerThreadId", (object?)message.ProviderThreadId ?? DBNull.Value);
         command.Parameters.AddWithValue("$messageId", (object?)message.MessageId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$messageIdRaw", (object?)message.MessageIdRaw ?? DBNull.Value);
+        command.Parameters.AddWithValue("$mimeMessageIdCanonical", (object?)message.MimeMessageIdCanonical ?? DBNull.Value);
+        command.Parameters.AddWithValue("$graphInternetMessageIdRaw", (object?)message.GraphInternetMessageIdRaw ?? DBNull.Value);
         command.Parameters.AddWithValue("$inReplyTo", (object?)message.InReplyTo ?? DBNull.Value);
         command.Parameters.AddWithValue("$references", (object?)message.References ?? DBNull.Value);
         command.Parameters.AddWithValue("$date", (object?)message.Date ?? DBNull.Value);
         command.Parameters.AddWithValue("$subject", (object?)message.Subject ?? DBNull.Value);
+        command.Parameters.AddWithValue("$subjectDecodedExact", (object?)message.SubjectDecodedExact ?? DBNull.Value);
+        command.Parameters.AddWithValue("$subjectSearchNormalized", (object?)message.SubjectSearchNormalized ?? DBNull.Value);
         command.Parameters.AddWithValue("$from", (object?)message.From ?? DBNull.Value);
         command.Parameters.AddWithValue("$to", (object?)message.To ?? DBNull.Value);
         command.Parameters.AddWithValue("$cc", (object?)message.Cc ?? DBNull.Value);
@@ -453,6 +508,7 @@ public static class Database
 
     public static async Task<DatabaseMessage?> GetMessageByProviderMessageIdAsync(
         string databasePath,
+        string sourceKey,
         string providerMessageId)
     {
         await using var connection = new SqliteConnection($"Data Source={databasePath}");
@@ -464,12 +520,16 @@ public static class Database
         command.CommandText = """
         SELECT
             Id,
+            SourceKey,
             ProviderMessageId,
-            ParserVersion
+            ParserVersion,
+            FilePath
         FROM Messages
-        WHERE ProviderMessageId = $providerMessageId;
+        WHERE SourceKey = $sourceKey
+          AND ProviderMessageId = $providerMessageId;
         """;
 
+        command.Parameters.AddWithValue("$sourceKey", sourceKey);
         command.Parameters.AddWithValue("$providerMessageId", providerMessageId);
 
         await using var reader = await command.ExecuteReaderAsync();
@@ -479,8 +539,10 @@ public static class Database
         return new DatabaseMessage
         {
             Id = reader.GetInt64(0),
-            ProviderMessageId = reader.GetString(1),
-            ParserVersion = reader.IsDBNull(2) ? null : reader.GetInt32(2)
+            SourceKey = reader.GetString(1),
+            ProviderMessageId = reader.GetString(2),
+            ParserVersion = reader.IsDBNull(3) ? null : reader.GetInt32(3),
+            FilePath = reader.GetString(4)
         };
     }
 
@@ -526,10 +588,15 @@ public static class Database
     SET
         ProviderThreadId = $providerThreadId,
         MessageId = $messageIdHeader,
+        MessageIdRaw = $messageIdRaw,
+        MimeMessageIdCanonical = $mimeMessageIdCanonical,
+        GraphInternetMessageIdRaw = $graphInternetMessageIdRaw,
         InReplyTo = $inReplyTo,
         ReferencesHeader = $references,
         Date = $date,
         Subject = $subject,
+        SubjectDecodedExact = $subjectDecodedExact,
+        SubjectSearchNormalized = $subjectSearchNormalized,
         FromAddress = $from,
         ToAddresses = $to,
         CcAddresses = $cc
@@ -538,10 +605,15 @@ public static class Database
 
         command.Parameters.AddWithValue("$providerThreadId", (object?)message.ProviderThreadId ?? DBNull.Value);
         command.Parameters.AddWithValue("$messageIdHeader", (object?)message.MessageId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$messageIdRaw", (object?)message.MessageIdRaw ?? DBNull.Value);
+        command.Parameters.AddWithValue("$mimeMessageIdCanonical", (object?)message.MimeMessageIdCanonical ?? DBNull.Value);
+        command.Parameters.AddWithValue("$graphInternetMessageIdRaw", (object?)message.GraphInternetMessageIdRaw ?? DBNull.Value);
         command.Parameters.AddWithValue("$inReplyTo", (object?)message.InReplyTo ?? DBNull.Value);
         command.Parameters.AddWithValue("$references", (object?)message.References ?? DBNull.Value);
         command.Parameters.AddWithValue("$date", (object?)message.Date ?? DBNull.Value);
         command.Parameters.AddWithValue("$subject", (object?)message.Subject ?? DBNull.Value);
+        command.Parameters.AddWithValue("$subjectDecodedExact", (object?)message.SubjectDecodedExact ?? DBNull.Value);
+        command.Parameters.AddWithValue("$subjectSearchNormalized", (object?)message.SubjectSearchNormalized ?? DBNull.Value);
         command.Parameters.AddWithValue("$from", (object?)message.From ?? DBNull.Value);
         command.Parameters.AddWithValue("$to", (object?)message.To ?? DBNull.Value);
         command.Parameters.AddWithValue("$cc", (object?)message.Cc ?? DBNull.Value);
@@ -556,7 +628,8 @@ public static class Database
         string fileName,
         string contentType,
         long size,
-        string filePath)
+        string filePath,
+        string relativePath)
     {
         await using var connection = new SqliteConnection($"Data Source={databasePath}");
 
@@ -571,7 +644,8 @@ public static class Database
             FileName,
             ContentType,
             Size,
-            FilePath
+            FilePath,
+            RelativePath
         )
         VALUES
         (
@@ -579,10 +653,12 @@ public static class Database
             $fileName,
             $contentType,
             $size,
-            $filePath
+            $filePath,
+            $relativePath
         )
         ON CONFLICT(Sha256)
-        DO NOTHING;
+        DO UPDATE SET
+            RelativePath = COALESCE(Attachments.RelativePath, excluded.RelativePath);
 
         SELECT Id
         FROM Attachments
@@ -594,6 +670,7 @@ public static class Database
         command.Parameters.AddWithValue("$contentType", contentType);
         command.Parameters.AddWithValue("$size", size);
         command.Parameters.AddWithValue("$filePath", filePath);
+        command.Parameters.AddWithValue("$relativePath", relativePath);
 
         var result = await command.ExecuteScalarAsync();
 
@@ -605,7 +682,11 @@ public static class Database
         long messageId,
         long attachmentId,
         string? contentId,
-        bool isInline)
+        bool isInline,
+        string? originalFileName = null,
+        string? contentDisposition = null,
+        string? providerAttachmentId = null,
+        string partRole = "Attachment")
     {
         await using var connection = new SqliteConnection($"Data Source={databasePath}");
 
@@ -614,28 +695,56 @@ public static class Database
         var command = connection.CreateCommand();
 
         command.CommandText = """
-        INSERT OR IGNORE INTO
-            MessageAttachments
+        INSERT INTO MessageAttachments
         (
             MessageId,
             AttachmentId,
             ContentId,
-            IsInline
+            IsInline,
+            OriginalFileName,
+            ContentDisposition,
+            ProviderAttachmentId,
+            PartRole
         )
         VALUES
         (
             $messageId,
             $attachmentId,
             $contentId,
-            $isInline
-        );
+            $isInline,
+            $originalFileName,
+            $contentDisposition,
+            $providerAttachmentId,
+            $partRole
+        )
+        ON CONFLICT(MessageId, AttachmentId, ContentId)
+        DO UPDATE SET
+            OriginalFileName = excluded.OriginalFileName,
+            ContentDisposition = excluded.ContentDisposition,
+            ProviderAttachmentId = excluded.ProviderAttachmentId,
+            PartRole = excluded.PartRole,
+            IsInline = excluded.IsInline;
         """;
 
         command.Parameters.AddWithValue("$messageId", messageId);
         command.Parameters.AddWithValue("$attachmentId", attachmentId);
         command.Parameters.AddWithValue("$contentId", (object?)contentId ?? DBNull.Value);
         command.Parameters.AddWithValue("$isInline", isInline ? 1 : 0);
+        command.Parameters.AddWithValue("$originalFileName", (object?)originalFileName ?? DBNull.Value);
+        command.Parameters.AddWithValue("$contentDisposition", (object?)contentDisposition ?? DBNull.Value);
+        command.Parameters.AddWithValue("$providerAttachmentId", (object?)providerAttachmentId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$partRole", partRole);
 
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public static async Task ClearMessageAttachmentsAsync(string databasePath, long messageId)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM MessageAttachments WHERE MessageId = $messageId;";
+        command.Parameters.AddWithValue("$messageId", messageId);
         await command.ExecuteNonQueryAsync();
     }
 
@@ -678,6 +787,7 @@ public static class Database
         command.CommandText = """
         SELECT
             Id,
+            SourceKey,
             ProviderMessageId,
             ProviderThreadId,
             MessageId,
@@ -689,7 +799,8 @@ public static class Database
             ToAddresses,
             CcAddresses,
             BccAddresses,
-            MessageType
+            MessageType,
+            FilePath
         FROM Messages
         ORDER BY Date;
         """;
@@ -701,18 +812,20 @@ public static class Database
             result.Add(new ThreadMessage
             {
                 Id = reader.GetInt64(0),
-                ProviderMessageId = reader.GetString(1),
-                ProviderThreadId = reader.IsDBNull(2) ? null : reader.GetString(2),
-                MessageId = reader.IsDBNull(3) ? null : reader.GetString(3),
-                InReplyTo = reader.IsDBNull(4) ? null : reader.GetString(4),
-                References = reader.IsDBNull(5) ? null : reader.GetString(5),
-                Date = reader.IsDBNull(6) ? null : reader.GetString(6),
-                Subject = reader.IsDBNull(7) ? null : reader.GetString(7),
-                From = reader.IsDBNull(8) ? null : reader.GetString(8),
-                To = reader.IsDBNull(9) ? null : reader.GetString(9),
-                Cc = reader.IsDBNull(10) ? null : reader.GetString(10),
-                Bcc = reader.IsDBNull(11) ? null : reader.GetString(11),
-                MessageType = reader.IsDBNull(12) ? "Email" : reader.GetString(12)
+                SourceKey = reader.GetString(1),
+                ProviderMessageId = reader.GetString(2),
+                ProviderThreadId = reader.IsDBNull(3) ? null : reader.GetString(3),
+                MessageId = reader.IsDBNull(4) ? null : reader.GetString(4),
+                InReplyTo = reader.IsDBNull(5) ? null : reader.GetString(5),
+                References = reader.IsDBNull(6) ? null : reader.GetString(6),
+                Date = reader.IsDBNull(7) ? null : reader.GetString(7),
+                Subject = reader.IsDBNull(8) ? null : reader.GetString(8),
+                From = reader.IsDBNull(9) ? null : reader.GetString(9),
+                To = reader.IsDBNull(10) ? null : reader.GetString(10),
+                Cc = reader.IsDBNull(11) ? null : reader.GetString(11),
+                Bcc = reader.IsDBNull(12) ? null : reader.GetString(12),
+                MessageType = reader.IsDBNull(13) ? "Email" : reader.GetString(13),
+                FilePath = reader.GetString(14)
             });
         }
 
@@ -728,13 +841,19 @@ public static class Database
         var command = connection.CreateCommand();
         command.CommandText = """
         SELECT
+            SourceKey,
+            Provider,
             ProviderMessageId,
             ProviderThreadId,
             MessageId,
+            MessageIdRaw,
+            MimeMessageIdCanonical,
+            GraphInternetMessageIdRaw,
             InReplyTo,
             ReferencesHeader,
             Date,
             Subject,
+            SubjectDecodedExact,
             FromAddress,
             ToAddresses,
             CcAddresses,
@@ -744,7 +863,7 @@ public static class Database
             ReactionEmoji,
             FilePath
         FROM Messages
-        ORDER BY ProviderMessageId;
+        ORDER BY SourceKey, ProviderMessageId;
         """;
 
         await using var reader = await command.ExecuteReaderAsync();
@@ -753,21 +872,27 @@ public static class Database
         {
             result.Add(new ProjectionMessage
             {
-                ProviderMessageId = reader.GetString(0),
-                ProviderThreadId = reader.IsDBNull(1) ? null : reader.GetString(1),
-                MessageId = reader.IsDBNull(2) ? null : reader.GetString(2),
-                InReplyTo = reader.IsDBNull(3) ? null : reader.GetString(3),
-                References = reader.IsDBNull(4) ? null : reader.GetString(4),
-                Date = reader.IsDBNull(5) ? null : reader.GetString(5),
-                Subject = reader.IsDBNull(6) ? null : reader.GetString(6),
-                From = reader.IsDBNull(7) ? null : reader.GetString(7),
-                To = reader.IsDBNull(8) ? null : reader.GetString(8),
-                Cc = reader.IsDBNull(9) ? null : reader.GetString(9),
-                Bcc = reader.IsDBNull(10) ? null : reader.GetString(10),
-                MessageType = reader.GetString(11),
-                IsUnsent = reader.GetBoolean(12),
-                ReactionEmoji = reader.IsDBNull(13) ? null : reader.GetString(13),
-                FilePath = reader.GetString(14)
+                SourceKey = reader.GetString(0),
+                Provider = reader.GetString(1),
+                ProviderMessageId = reader.GetString(2),
+                ProviderThreadId = reader.IsDBNull(3) ? null : reader.GetString(3),
+                MessageId = reader.IsDBNull(4) ? null : reader.GetString(4),
+                MessageIdRaw = reader.IsDBNull(5) ? null : reader.GetString(5),
+                MimeMessageIdCanonical = reader.IsDBNull(6) ? null : reader.GetString(6),
+                GraphInternetMessageIdRaw = reader.IsDBNull(7) ? null : reader.GetString(7),
+                InReplyTo = reader.IsDBNull(8) ? null : reader.GetString(8),
+                References = reader.IsDBNull(9) ? null : reader.GetString(9),
+                Date = reader.IsDBNull(10) ? null : reader.GetString(10),
+                Subject = reader.IsDBNull(11) ? null : reader.GetString(11),
+                SubjectDecodedExact = reader.IsDBNull(12) ? null : reader.GetString(12),
+                From = reader.IsDBNull(13) ? null : reader.GetString(13),
+                To = reader.IsDBNull(14) ? null : reader.GetString(14),
+                Cc = reader.IsDBNull(15) ? null : reader.GetString(15),
+                Bcc = reader.IsDBNull(16) ? null : reader.GetString(16),
+                MessageType = reader.GetString(17),
+                IsUnsent = reader.GetBoolean(18),
+                ReactionEmoji = reader.IsDBNull(19) ? null : reader.GetString(19),
+                FilePath = reader.GetString(20)
             });
         }
 
@@ -804,6 +929,7 @@ public static class Database
 
     public static async Task<DeliveryStateChanges> ReconcileUnsentMessagesAsync(
         string databasePath,
+        string sourceKey,
         IReadOnlySet<string> unsentProviderMessageIds)
     {
         await using var connection = new SqliteConnection($"Data Source={databasePath}");
@@ -814,7 +940,12 @@ public static class Database
         var previouslyUnsentIds = new HashSet<string>(StringComparer.Ordinal);
         var read = connection.CreateCommand();
         read.Transaction = transaction;
-        read.CommandText = "SELECT ProviderMessageId, IsUnsent FROM Messages;";
+        read.CommandText = """
+        SELECT ProviderMessageId, IsUnsent
+        FROM Messages
+        WHERE SourceKey = $sourceKey;
+        """;
+        read.Parameters.AddWithValue("$sourceKey", sourceKey);
 
         await using (var reader = await read.ExecuteReaderAsync())
         {
@@ -832,7 +963,13 @@ public static class Database
 
         var clear = connection.CreateCommand();
         clear.Transaction = transaction;
-        clear.CommandText = "UPDATE Messages SET IsUnsent = 0 WHERE IsUnsent <> 0;";
+        clear.CommandText = """
+        UPDATE Messages
+        SET IsUnsent = 0
+        WHERE SourceKey = $sourceKey
+          AND IsUnsent <> 0;
+        """;
+        clear.Parameters.AddWithValue("$sourceKey", sourceKey);
         await clear.ExecuteNonQueryAsync();
 
         var mark = connection.CreateCommand();
@@ -840,8 +977,10 @@ public static class Database
         mark.CommandText = """
         UPDATE Messages
         SET IsUnsent = 1
-        WHERE ProviderMessageId = $providerMessageId;
+        WHERE SourceKey = $sourceKey
+          AND ProviderMessageId = $providerMessageId;
         """;
+        mark.Parameters.AddWithValue("$sourceKey", sourceKey);
         var idParameter = mark.Parameters.Add("$providerMessageId", SqliteType.Text);
 
         foreach (var id in currentUnsentIds)
@@ -1485,11 +1624,15 @@ public static class Database
 
         command.CommandText = """
         SELECT
-            a.FileName,
+            COALESCE(ma.OriginalFileName, a.FileName),
+            ma.OriginalFileName,
             a.ContentType,
             a.Size,
             a.FilePath,
-            ma.IsInline
+            a.RelativePath,
+            ma.IsInline,
+            ma.ContentDisposition,
+            ma.PartRole
 
         FROM MessageAttachments ma
 
@@ -1499,7 +1642,7 @@ public static class Database
         WHERE ma.MessageId = $messageId
 
         ORDER BY
-            a.FileName;
+            COALESCE(ma.OriginalFileName, a.FileName);
         """;
 
         command.Parameters.AddWithValue("$messageId", messageId);
@@ -1511,10 +1654,14 @@ public static class Database
             result.Add(new PdfAttachment
             {
                 FileName = reader.IsDBNull(0) ? "(unnamed)" : reader.GetString(0),
-                ContentType = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                Size = reader.GetInt64(2),
-                FilePath = reader.GetString(3),
-                IsInline = reader.GetInt64(4) != 0
+                OriginalFileName = reader.IsDBNull(1) ? null : reader.GetString(1),
+                ContentType = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                Size = reader.GetInt64(3),
+                FilePath = reader.GetString(4),
+                RelativePath = reader.IsDBNull(5) ? null : reader.GetString(5),
+                IsInline = reader.GetInt64(6) != 0,
+                ContentDisposition = reader.IsDBNull(7) ? null : reader.GetString(7),
+                PartRole = reader.IsDBNull(8) ? null : reader.GetString(8)
             });
         }
 
@@ -1522,7 +1669,8 @@ public static class Database
     }
 
     public static async Task<List<EmlRepairRecord>> GetMessagesForEmlValidationAsync(
-        string databasePath)
+        string databasePath,
+        string? sourceKey = null)
     {
         var result = new List<EmlRepairRecord>();
 
@@ -1535,11 +1683,15 @@ public static class Database
         command.CommandText = """
         SELECT
             Id,
+            SourceKey,
             ProviderMessageId,
-            FilePath
+            FilePath,
+            ParserVersion
         FROM Messages
+        WHERE $sourceKey IS NULL OR SourceKey = $sourceKey
         ORDER BY Id;
         """;
+        command.Parameters.AddWithValue("$sourceKey", (object?)sourceKey ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync();
 
@@ -1548,8 +1700,10 @@ public static class Database
             result.Add(new EmlRepairRecord
             {
                 Id = reader.GetInt64(0),
-                ProviderMessageId = reader.GetString(1),
-                FilePath = reader.IsDBNull(2) ? "" : reader.GetString(2)
+                SourceKey = reader.GetString(1),
+                ProviderMessageId = reader.GetString(2),
+                FilePath = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                ParserVersion = reader.IsDBNull(4) ? null : reader.GetInt32(4)
             });
         }
 
@@ -1602,11 +1756,12 @@ public static class Database
         m.FilePath,
 
         (
-            SELECT GROUP_CONCAT(a.FileName, ' ')
+            SELECT GROUP_CONCAT(COALESCE(ma.OriginalFileName, a.FileName), ' ')
             FROM MessageAttachments ma
             INNER JOIN Attachments a
                 ON a.Id = ma.AttachmentId
             WHERE ma.MessageId = m.Id
+              AND ma.PartRole IN ('Attachment', 'EmbeddedMessage')
         ) AS AttachmentNames
 
     FROM Messages m
@@ -1828,7 +1983,8 @@ public static class Database
     }
 
     public static async Task<HashSet<string>> GetAllProviderMessageIdsAsync(
-        string databasePath)
+        string databasePath,
+        string sourceKey)
     {
         var result = new HashSet<string>(StringComparer.Ordinal);
 
@@ -1841,9 +1997,11 @@ public static class Database
         command.CommandText = """
     SELECT ProviderMessageId
     FROM Messages
-    WHERE ProviderMessageId IS NOT NULL
+    WHERE SourceKey = $sourceKey
+      AND ProviderMessageId IS NOT NULL
       AND TRIM(ProviderMessageId) <> '';
     """;
+        command.Parameters.AddWithValue("$sourceKey", sourceKey);
 
         await using var reader = await command.ExecuteReaderAsync();
 

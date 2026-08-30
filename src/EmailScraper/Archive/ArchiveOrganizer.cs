@@ -16,11 +16,6 @@ public static class ArchiveOrganizer
 
         Console.WriteLine($"Messages: {messages.Count:N0}");
 
-        var emlIndex = BuildEmlIndex(archivePath);
-
-        Console.WriteLine($"EML files indexed: {emlIndex.Count:N0}");
-        Console.WriteLine();
-
         await Database.SetThreadNamesFromSubjectsAsync(databasePath);
 
         var processed = 0;
@@ -29,15 +24,13 @@ public static class ArchiveOrganizer
 
         foreach (var message in messages)
         {
-            /*
-             * Locate the original EML.
-             */
-            emlIndex.TryGetValue(message.ProviderMessageId, out var emlPath);
+            var emlPath = message.FilePath;
 
-            if (emlPath == null)
+            if (string.IsNullOrWhiteSpace(emlPath) || !File.Exists(emlPath))
             {
                 Console.WriteLine();
-                Console.WriteLine($"WARNING: EML not found for " + $"{message.ProviderMessageId}");
+                Console.WriteLine($"WARNING: EML not found for " +
+                    $"{message.SourceKey}/{message.ProviderMessageId}");
                 missing++;
             }
             else
@@ -64,35 +57,4 @@ public static class ArchiveOrganizer
         Console.WriteLine("Step 5 complete.");
     }
 
-    private static Dictionary<string, string> BuildEmlIndex(
-        string archivePath)
-    {
-        var messagesPath = Path.Combine(archivePath, "messages");
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        if (!Directory.Exists(messagesPath))
-        {
-            return result;
-        }
-
-        /*
-         * Downloaded EML files end with _{providerMessageId}.eml.
-         * Index them once instead of scanning the complete
-         * archive separately for every database message.
-         */
-        foreach (var path in Directory.EnumerateFiles(messagesPath, "*.eml", SearchOption.AllDirectories))
-        {
-            var fileName = Path.GetFileNameWithoutExtension(path);
-            var separator = fileName.LastIndexOf('_');
-
-            if (separator < 0 || separator == fileName.Length - 1)
-                continue;
-
-            var providerMessageId = fileName[(separator + 1)..];
-
-            result.TryAdd(providerMessageId, path);
-        }
-
-        return result;
-    }
 }

@@ -2,11 +2,21 @@
 
 public sealed class MessageRecord
 {
+    public string SourceKey { get; set; } = "";
+
+    public string Provider { get; set; } = "";
+
     public string ProviderMessageId { get; set; } = "";
 
     public string? ProviderThreadId { get; set; }
 
     public string? MessageId { get; set; }
+
+    public string? MessageIdRaw { get; set; }
+
+    public string? MimeMessageIdCanonical { get; set; }
+
+    public string? GraphInternetMessageIdRaw { get; set; }
 
     public string? InReplyTo { get; set; }
 
@@ -15,6 +25,10 @@ public sealed class MessageRecord
     public string? Date { get; set; }
 
     public string? Subject { get; set; }
+
+    public string? SubjectDecodedExact { get; set; }
+
+    public string? SubjectSearchNormalized { get; set; }
 
     public string? From { get; set; }
 

@@ -16,10 +16,13 @@ public static class ThreadBuilder
         Console.WriteLine("==========================================");
         Console.WriteLine();
 
-        var messages = await Database.GetAllMessagesForThreadingAsync(databasePath);
+        var allMessages = await Database.GetAllMessagesForThreadingAsync(databasePath);
+        var messages = SelectCanonicalThreadCopies(allMessages);
         var existingThreads = await Database.GetExistingThreadsAsync(databasePath);
 
-        Console.WriteLine($"Messages found: {messages.Count:N0}");
+        Console.WriteLine($"Messages found:             {allMessages.Count:N0}");
+        Console.WriteLine($"Canonical threading copies: {messages.Count:N0}");
+        Console.WriteLine($"Duplicate source copies:    {allMessages.Count - messages.Count:N0}");
 
         Console.WriteLine();
 
@@ -136,7 +139,7 @@ public static class ThreadBuilder
          * naturally represented as single-message components.
          */
         var threadedMessageIds = threadGroups.SelectMany(x => x).Select(x => x.Id).ToHashSet();
-        var standaloneMessages = messages.Count(x => !threadedMessageIds.Contains(x.Id));
+        var standaloneMessages = allMessages.Count(x => !threadedMessageIds.Contains(x.Id));
 
         Console.WriteLine($"Logical thread groups: {threadGroups.Count:N0}");
         Console.WriteLine($"Standalone messages   : {standaloneMessages:N0}");
@@ -534,6 +537,18 @@ public static class ThreadBuilder
             : StringComparer.Ordinal.Compare(GetCanonicalMessageIdentity(left), GetCanonicalMessageIdentity(right));
     }
 
+    private static List<ThreadMessage> SelectCanonicalThreadCopies(
+        IEnumerable<ThreadMessage> messages) =>
+        messages
+            .GroupBy(message => string.IsNullOrWhiteSpace(message.MessageId)
+                ? $"row:{message.Id}"
+                : $"message:{NormalizeMessageId(message.MessageId)}",
+                StringComparer.Ordinal)
+            .Select(group => group.OrderBy(message => message.Id).First())
+            .OrderBy(GetDate)
+            .ThenBy(message => message.Id)
+            .ToList();
+
     private static string BuildThreadKey(
         List<ThreadMessage> messages)
     {
@@ -568,7 +583,8 @@ public static class ThreadBuilder
         if (!string.IsNullOrWhiteSpace(message.MessageId))
             return $"message:{NormalizeMessageId(message.MessageId)}";
 
-        return $"provider:{message.ProviderMessageId.ToLowerInvariant()}";
+        return $"provider:{message.SourceKey.ToLowerInvariant()}:" +
+            message.ProviderMessageId.ToLowerInvariant();
     }
 
     private static List<string> ParseReferences(

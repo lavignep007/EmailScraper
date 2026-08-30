@@ -3,7 +3,6 @@ using Google.Apis.Auth.OAuth2;
 using Google.Apis.Gmail.v1;
 using Google.Apis.Services;
 using Google.Apis.Util.Store;
-using System.Text;
 
 namespace EmailScraper.EmailProviders.Gmail;
 
@@ -12,20 +11,31 @@ public sealed class GmailEmailProvider : IEmailProvider
     private const string ApplicationName = "Email Scraper";
     private const string LastHistoryIdKey = "LastHistoryId";
 
-    private readonly AppConfig config;
+    private readonly AppConfig appConfig;
+    private readonly EmailSourceConfig source;
     private readonly GmailService gmail;
 
-    private GmailEmailProvider(AppConfig config, GmailService gmail)
+    private GmailEmailProvider(
+        AppConfig appConfig,
+        EmailSourceConfig source,
+        GmailService gmail)
     {
-        this.config = config;
+        this.appConfig = appConfig;
+        this.source = source;
         this.gmail = gmail;
     }
 
-    public string Name => "Gmail";
+    public string SourceKey => source.Id;
 
-    public static async Task<IEmailProvider> CreateAsync(AppConfig config)
+    public string Name => $"{source.Name} (Gmail)";
+
+    public string MailboxAddress => source.MailboxAddress;
+
+    public static async Task<IEmailProvider> CreateAsync(
+        AppConfig appConfig,
+        EmailSourceConfig source)
     {
-        var credentialsPath = Path.Combine(AppContext.BaseDirectory, "credentials.json");
+        var credentialsPath = ResolveRuntimePath(source.CredentialsPath);
 
         if (!File.Exists(credentialsPath))
             throw new FileNotFoundException(
@@ -33,12 +43,15 @@ public sealed class GmailEmailProvider : IEmailProvider
                 credentialsPath);
 
         using var stream = new FileStream(credentialsPath, FileMode.Open, FileAccess.Read);
+        var tokenPath = string.IsNullOrWhiteSpace(source.TokenPath)
+            ? Path.Combine(AppContext.BaseDirectory, "token", source.Id, "gmail")
+            : ResolveRuntimePath(source.TokenPath);
         var credential = await GoogleWebAuthorizationBroker.AuthorizeAsync(
             GoogleClientSecrets.FromStream(stream).Secrets,
             [GmailService.Scope.GmailReadonly],
-            "user",
+            source.Id,
             CancellationToken.None,
-            new FileDataStore("./token", true));
+            new FileDataStore(tokenPath, true));
 
         var gmail = new GmailService(
             new BaseClientService.Initializer
@@ -47,11 +60,18 @@ public sealed class GmailEmailProvider : IEmailProvider
                 ApplicationName = ApplicationName
             });
 
-        return new GmailEmailProvider(config, gmail);
+        var profile = await gmail.Users.GetProfile("me").ExecuteAsync();
+        if (!string.IsNullOrWhiteSpace(source.MailboxAddress) &&
+            !string.Equals(profile.EmailAddress, source.MailboxAddress, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"Gmail source '{source.Id}' authenticated as '{profile.EmailAddress}', " +
+                $"but MailboxAddress is '{source.MailboxAddress}'.");
+
+        return new GmailEmailProvider(appConfig, source, gmail);
     }
 
     public Task<string?> GetSyncCheckpointAsync() =>
-        Database.GetSyncStateAsync(config.DatabasePath, LastHistoryIdKey);
+        Database.GetSyncStateAsync(appConfig.DatabasePath, StateKey(LastHistoryIdKey));
 
     public async Task<SynchronizationResult> FullSyncAsync()
     {
@@ -69,7 +89,7 @@ public sealed class GmailEmailProvider : IEmailProvider
         Console.WriteLine($"Starting history ID: {startingHistoryId}");
         Console.WriteLine();
 
-        var query = BuildQuery(config.EmailAddresses);
+        var query = BuildQuery(source.FilterAddresses);
         Console.WriteLine("Gmail query:");
         Console.WriteLine($"  {query}");
         Console.WriteLine();
@@ -99,7 +119,7 @@ public sealed class GmailEmailProvider : IEmailProvider
 
                 try
                 {
-                    if (await Database.MessageExistsAsync(config.DatabasePath, messageRef.Id))
+                    if (await Database.MessageExistsAsync(appConfig.DatabasePath, source.Id, messageRef.Id))
                     {
                         skipped++;
                         continue;
@@ -125,13 +145,13 @@ public sealed class GmailEmailProvider : IEmailProvider
 
         if (startingHistoryId.HasValue)
             await Database.SetSyncStateAsync(
-                config.DatabasePath,
-                LastHistoryIdKey,
+                appConfig.DatabasePath,
+                StateKey(LastHistoryIdKey),
                 startingHistoryId.Value.ToString());
 
         await Database.SetSyncStateAsync(
-            config.DatabasePath,
-            "LastFullSyncUtc",
+            appConfig.DatabasePath,
+            StateKey("LastFullSyncUtc"),
             DateTimeOffset.UtcNow.ToString("O"));
 
         Console.WriteLine();
@@ -205,11 +225,12 @@ public sealed class GmailEmailProvider : IEmailProvider
         if (messageIds.Count == 0)
         {
             if (!string.IsNullOrWhiteSpace(newestHistoryId))
-                await Database.SetSyncStateAsync(config.DatabasePath, LastHistoryIdKey, newestHistoryId);
+                await Database.SetSyncStateAsync(
+                    appConfig.DatabasePath, StateKey(LastHistoryIdKey), newestHistoryId);
 
             await Database.SetSyncStateAsync(
-                config.DatabasePath,
-                "LastIncrementalSyncUtc",
+                appConfig.DatabasePath,
+                StateKey("LastIncrementalSyncUtc"),
                 DateTimeOffset.UtcNow.ToString("O"));
 
             Console.WriteLine("Nothing new to archive.");
@@ -223,7 +244,7 @@ public sealed class GmailEmailProvider : IEmailProvider
         {
             try
             {
-                if (await Database.MessageExistsAsync(config.DatabasePath, messageId))
+                if (await Database.MessageExistsAsync(appConfig.DatabasePath, source.Id, messageId))
                 {
                     skipped++;
                     continue;
@@ -244,11 +265,12 @@ public sealed class GmailEmailProvider : IEmailProvider
         }
 
         if (!string.IsNullOrWhiteSpace(newestHistoryId))
-            await Database.SetSyncStateAsync(config.DatabasePath, LastHistoryIdKey, newestHistoryId);
+            await Database.SetSyncStateAsync(
+                appConfig.DatabasePath, StateKey(LastHistoryIdKey), newestHistoryId);
 
         await Database.SetSyncStateAsync(
-            config.DatabasePath,
-            "LastIncrementalSyncUtc",
+            appConfig.DatabasePath,
+            StateKey("LastIncrementalSyncUtc"),
             DateTimeOffset.UtcNow.ToString("O"));
 
         Console.WriteLine();
@@ -260,7 +282,11 @@ public sealed class GmailEmailProvider : IEmailProvider
     }
 
     public Task ValidateAsync() =>
-        ArchiveValidator.ValidateAsync(gmail, config.DatabasePath, BuildQuery(config.EmailAddresses));
+        ArchiveValidator.ValidateGmailSourceAsync(
+            gmail,
+            appConfig.DatabasePath,
+            source.Id,
+            BuildQuery(source.FilterAddresses));
 
     public async Task RefreshDeliveryStatesAsync()
     {
@@ -272,7 +298,8 @@ public sealed class GmailEmailProvider : IEmailProvider
         await AddMatchingMessageIdsAsync("in:scheduled", unsentIds);
 
         var changes = await Database.ReconcileUnsentMessagesAsync(
-            config.DatabasePath,
+            appConfig.DatabasePath,
+            source.Id,
             unsentIds);
 
         Console.WriteLine($"Currently unsent:       {changes.CurrentlyUnsent:N0}");
@@ -315,7 +342,9 @@ public sealed class GmailEmailProvider : IEmailProvider
         Console.WriteLine("==========================================");
         Console.WriteLine();
 
-        var messages = await Database.GetMessagesForEmlValidationAsync(config.DatabasePath);
+        var messages = await Database.GetMessagesForEmlValidationAsync(
+            appConfig.DatabasePath,
+            source.Id);
         var corrupt = messages
             .Where(x => string.IsNullOrWhiteSpace(x.FilePath) ||
                 !File.Exists(x.FilePath) || new FileInfo(x.FilePath).Length == 0)
@@ -358,7 +387,8 @@ public sealed class GmailEmailProvider : IEmailProvider
                     throw new InvalidOperationException("Temporary repaired EML is empty.");
 
                 File.Move(tempPath, item.FilePath, overwrite: true);
-                await Database.UpdateProviderThreadIdAsync(config.DatabasePath, item.Id, gmailMessage.ThreadId);
+                await Database.UpdateProviderThreadIdAsync(
+                    appConfig.DatabasePath, item.Id, gmailMessage.ThreadId);
 
                 Console.WriteLine($"  OK - {rawBytes.Length:N0} bytes");
                 repaired++;
@@ -380,52 +410,13 @@ public sealed class GmailEmailProvider : IEmailProvider
     {
         var message = await GetRawMessageAsync(gmailMessageId);
         var rawBytes = DecodeBase64Url(message.Raw!);
-        var headers = ParseHeaders(rawBytes);
-        var date = GetHeader(headers, "Date");
-        var subject = GetHeader(headers, "Subject");
-        var messageId = GetHeader(headers, "Message-ID");
-        var from = GetHeader(headers, "From");
-        var to = GetHeader(headers, "To");
-        var cc = GetHeader(headers, "Cc");
-        var bcc = GetHeader(headers, "Bcc");
-        var inReplyTo = GetHeader(headers, "In-Reply-To");
-        var references = GetHeader(headers, "References");
-        var isReaction = ContainsReactionMimeType(rawBytes);
-        var messageType = isReaction ? "Reaction" : "Email";
-        var reactionEmoji = isReaction ? TryExtractReactionEmoji(rawBytes) : null;
-
-        if (!IsRelevantMessage(config.EmailAddresses, from, to, cc, bcc)) return false;
-
-        var year = TryGetYear(date);
-        var yearDirectory = Path.Combine(config.ArchivePath, "messages", year.ToString());
-        Directory.CreateDirectory(yearDirectory);
-
-        var safeSubject = SanitizeFileName(string.IsNullOrWhiteSpace(subject) ? messageType : subject);
-        var timestamp = TryFormatDate(date);
-        var fileName = $"{timestamp}_{safeSubject}_{gmailMessageId}.eml";
-        var filePath = Path.Combine(yearDirectory, fileName);
-
-        await File.WriteAllBytesAsync(filePath, rawBytes);
-        await Database.InsertMessageAsync(config.DatabasePath, new MessageRecord
-        {
-            ProviderMessageId = gmailMessageId,
-            ProviderThreadId = message.ThreadId,
-            MessageId = messageId,
-            InReplyTo = inReplyTo,
-            References = references,
-            Date = date,
-            Subject = subject,
-            From = from,
-            To = to,
-            Cc = cc,
-            Bcc = bcc,
-            MessageType = messageType,
-            IsUnsent = IsUnsent(message.LabelIds),
-            ReactionEmoji = reactionEmoji,
-            FilePath = filePath
-        });
-
-        return true;
+        return await RawMessageImporter.ImportAsync(
+            appConfig,
+            source,
+            gmailMessageId,
+            message.ThreadId,
+            rawBytes,
+            IsUnsent(message.LabelIds));
     }
 
     private async Task<Google.Apis.Gmail.v1.Data.Message> GetRawMessageAsync(string gmailMessageId)
@@ -442,6 +433,8 @@ public sealed class GmailEmailProvider : IEmailProvider
 
     internal static string BuildQuery(IReadOnlyCollection<string> addresses)
     {
+        if (addresses.Count == 0) return "in:anywhere";
+
         var terms = new List<string>();
 
         foreach (var address in addresses)
@@ -455,75 +448,10 @@ public sealed class GmailEmailProvider : IEmailProvider
         return "{" + string.Join(" ", terms) + "}";
     }
 
-    private static bool IsRelevantMessage(
-        IReadOnlyCollection<string> addresses,
-        params string?[] headers)
-    {
-        foreach (var header in headers)
-        {
-            if (string.IsNullOrWhiteSpace(header)) continue;
-
-            foreach (var address in addresses)
-                if (header.Contains(address, StringComparison.OrdinalIgnoreCase)) return true;
-        }
-
-        return false;
-    }
-
-    private static bool ContainsReactionMimeType(byte[] raw) =>
-        Encoding.UTF8.GetString(raw).Contains(
-            "text/vnd.google.email-reaction+json",
-            StringComparison.OrdinalIgnoreCase);
-
     private static bool IsUnsent(IEnumerable<string>? labelIds) =>
         labelIds?.Any(label =>
             string.Equals(label, "DRAFT", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(label, "SCHEDULED", StringComparison.OrdinalIgnoreCase)) == true;
-
-    private static string? TryExtractReactionEmoji(byte[] raw)
-    {
-        var text = Encoding.UTF8.GetString(raw);
-        const string marker = "\"emoji\":\"";
-        var index = text.IndexOf(marker, StringComparison.Ordinal);
-        if (index < 0) return null;
-
-        index += marker.Length;
-        var end = text.IndexOf('"', index);
-        return end < 0 ? null : text[index..end];
-    }
-
-    private static Dictionary<string, string> ParseHeaders(byte[] raw)
-    {
-        var text = Encoding.UTF8.GetString(raw);
-        var separator = text.IndexOf("\r\n\r\n", StringComparison.Ordinal);
-        if (separator < 0) separator = text.IndexOf("\n\n", StringComparison.Ordinal);
-
-        var headerText = separator >= 0 ? text[..separator] : text;
-        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        string? currentName = null;
-
-        foreach (var rawLine in headerText.Split('\n'))
-        {
-            var line = rawLine.TrimEnd('\r');
-
-            if (line.StartsWith(' ') || line.StartsWith('\t'))
-            {
-                if (currentName is not null) headers[currentName] += " " + line.Trim();
-                continue;
-            }
-
-            var colon = line.IndexOf(':');
-            if (colon <= 0) continue;
-
-            currentName = line[..colon].Trim();
-            headers[currentName] = line[(colon + 1)..].Trim();
-        }
-
-        return headers;
-    }
-
-    private static string? GetHeader(Dictionary<string, string> headers, string name) =>
-        headers.TryGetValue(name, out var value) ? value : null;
 
     private static byte[] DecodeBase64Url(string value)
     {
@@ -533,23 +461,8 @@ public sealed class GmailEmailProvider : IEmailProvider
         return Convert.FromBase64String(value);
     }
 
-    private static int TryGetYear(string? date) =>
-        DateTimeOffset.TryParse(date, out var parsed) ? parsed.Year : 0;
+    private string StateKey(string name) => $"Source:{source.Id}:Gmail:{name}";
 
-    private static string TryFormatDate(string? date) =>
-        DateTimeOffset.TryParse(date, out var parsed)
-            ? parsed.ToLocalTime().ToString("yyyy-MM-dd_HHmmss")
-            : "unknown-date";
-
-    private static string SanitizeFileName(string value)
-    {
-        foreach (var character in Path.GetInvalidFileNameChars())
-            value = value.Replace(character, '_');
-
-        value = value.Replace('\r', ' ').Replace('\n', ' ');
-        while (value.Contains("  ")) value = value.Replace("  ", " ");
-
-        value = value.Trim().TrimEnd('.');
-        return value.Length > 150 ? value[..150] : value;
-    }
+    private static string ResolveRuntimePath(string path) =>
+        Path.IsPathRooted(path) ? path : Path.Combine(AppContext.BaseDirectory, path);
 }

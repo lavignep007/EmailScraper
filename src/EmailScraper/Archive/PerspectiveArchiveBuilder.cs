@@ -8,27 +8,34 @@ namespace EmailScraper.Archive;
 
 public static class PerspectiveArchiveBuilder
 {
-    private const int ProjectionVersion = 1;
+    private const int ProjectionVersion = 2;
     private const string ManifestFileName = "perspective-manifest.json";
 
     public static async Task BuildAsync(
         string sourceDatabasePath,
         string sourceArchivePath,
-        PerspectiveArchiveConfig config)
+        PerspectiveArchiveConfig config,
+        IReadOnlyCollection<PerspectiveSourceRule> sourceRules)
     {
         if (string.IsNullOrWhiteSpace(config.ArchivePath))
             throw new InvalidOperationException($"Perspective archive '{config.Name}' has no ArchivePath.");
 
-        var addresses = config.EmailAddresses
-            .Select(NormalizeAddress)
-            .Where(x => x.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var rules = sourceRules
+            .Where(x => !string.IsNullOrWhiteSpace(x.SourceKey))
+            .Select(x => new PerspectiveSourceRule(
+                x.SourceKey,
+                x.EmailAddresses
+                    .Select(NormalizeAddress)
+                    .Where(address => address.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(address => address, StringComparer.OrdinalIgnoreCase)
+                    .ToList()))
+            .Where(x => x.EmailAddresses.Count > 0)
+            .ToDictionary(x => x.SourceKey, StringComparer.OrdinalIgnoreCase);
 
-        if (addresses.Count == 0)
+        if (rules.Count == 0)
         {
-            Console.WriteLine($"Perspective archive '{config.Name}' has no email addresses; skipping.");
+            Console.WriteLine($"Perspective archive '{config.Name}' has no source rules; skipping.");
             return;
         }
 
@@ -38,14 +45,15 @@ public static class PerspectiveArchiveBuilder
 
         var sourceMessages = await Database.GetMessagesForProjectionAsync(sourceDatabasePath);
         var addressEligible = sourceMessages
-            .Where(x => IsVisibleTo(x, addresses))
+            .Where(x => rules.TryGetValue(x.SourceKey, out var rule) &&
+                IsVisibleTo(x, rule.EmailAddresses))
             .ToList();
         var retained = addressEligible
             .Where(x => !x.IsUnsent)
             .ToList();
         var excludedByAddress = sourceMessages.Count - addressEligible.Count;
         var excludedAsUnsent = addressEligible.Count - retained.Count;
-        var fingerprint = BuildFingerprint(retained, addresses);
+        var fingerprint = BuildFingerprint(retained, rules.Values);
 
         if (await IsCurrentAsync(targetRoot, fingerprint))
         {
@@ -59,7 +67,8 @@ public static class PerspectiveArchiveBuilder
         Console.WriteLine($" PERSPECTIVE ARCHIVE - {config.Name}");
         Console.WriteLine("==========================================");
         Console.WriteLine();
-        Console.WriteLine($"Perspective addresses: {string.Join(", ", addresses)}");
+        foreach (var rule in rules.Values.OrderBy(x => x.SourceKey, StringComparer.OrdinalIgnoreCase))
+            Console.WriteLine($"{rule.SourceKey}: {string.Join(", ", rule.EmailAddresses)}");
         Console.WriteLine($"Source messages:       {sourceMessages.Count:N0}");
         Console.WriteLine($"Messages retained:     {retained.Count:N0}");
         Console.WriteLine($"Excluded by address:   {excludedByAddress:N0}");
@@ -86,7 +95,19 @@ public static class PerspectiveArchiveBuilder
             {
                 ProjectionVersion = ProjectionVersion,
                 Name = config.Name,
-                EmailAddresses = addresses,
+                SourceRules = rules.Values
+                    .OrderBy(x => x.SourceKey, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(
+                        x => x.SourceKey,
+                        x => x.EmailAddresses.ToList(),
+                        StringComparer.OrdinalIgnoreCase),
+                PerspectiveScope = rules.Keys.Any(key =>
+                    retained.Any(message => string.Equals(message.SourceKey, key, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(message.Provider, "Microsoft365", StringComparison.OrdinalIgnoreCase)))
+                    ? "multi-provider"
+                    : "personal-gmail-only",
+                Microsoft365DirectObservationsIncluded = retained.Any(message =>
+                    string.Equals(message.Provider, "Microsoft365", StringComparison.OrdinalIgnoreCase)),
                 Fingerprint = fingerprint,
                 SourceMessages = sourceMessages.Count,
                 RetainedMessages = retained.Count,
@@ -149,17 +170,20 @@ public static class PerspectiveArchiveBuilder
 
     private static string BuildFingerprint(
         IReadOnlyCollection<ProjectionMessage> messages,
-        IReadOnlyCollection<string> addresses)
+        IEnumerable<PerspectiveSourceRule> sourceRules)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         Append($"version:{ProjectionVersion}\n");
 
-        foreach (var address in addresses) Append($"address:{address}\n");
+        foreach (var rule in sourceRules.OrderBy(x => x.SourceKey, StringComparer.OrdinalIgnoreCase))
+            foreach (var address in rule.EmailAddresses)
+                Append($"source:{rule.SourceKey}|address:{address}\n");
 
         foreach (var message in messages.OrderBy(x => x.ProviderMessageId, StringComparer.Ordinal))
         {
             var file = new FileInfo(message.FilePath);
-            Append($"message:{message.ProviderMessageId}|{file.Length}|{file.LastWriteTimeUtc.Ticks}\n");
+            Append($"message:{message.SourceKey}|{message.ProviderMessageId}|" +
+                $"{file.Length}|{file.LastWriteTimeUtc.Ticks}\n");
         }
 
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
@@ -212,13 +236,19 @@ public static class PerspectiveArchiveBuilder
 
             await Database.InsertMessageAsync(targetDatabasePath, new MessageRecord
             {
+                SourceKey = message.SourceKey,
+                Provider = message.Provider,
                 ProviderMessageId = message.ProviderMessageId,
                 ProviderThreadId = message.ProviderThreadId,
                 MessageId = message.MessageId,
+                MessageIdRaw = message.MessageIdRaw,
+                MimeMessageIdCanonical = message.MimeMessageIdCanonical,
+                GraphInternetMessageIdRaw = message.GraphInternetMessageIdRaw,
                 InReplyTo = message.InReplyTo,
                 References = message.References,
                 Date = message.Date,
                 Subject = message.Subject,
+                SubjectDecodedExact = message.SubjectDecodedExact,
                 From = message.From,
                 To = message.To,
                 Cc = message.Cc,
@@ -289,12 +319,15 @@ public static class PerspectiveArchiveBuilder
     {
         public int ProjectionVersion { get; set; }
         public string Name { get; set; } = "";
-        public List<string> EmailAddresses { get; set; } = [];
+        public Dictionary<string, List<string>> SourceRules { get; set; } =
+            new(StringComparer.OrdinalIgnoreCase);
         public string Fingerprint { get; set; } = "";
         public int SourceMessages { get; set; }
         public int RetainedMessages { get; set; }
         public int ExcludedByAddress { get; set; }
         public int ExcludedAsUnsent { get; set; }
         public DateTimeOffset GeneratedUtc { get; set; }
+        public string PerspectiveScope { get; set; } = "";
+        public bool Microsoft365DirectObservationsIncluded { get; set; }
     }
 }

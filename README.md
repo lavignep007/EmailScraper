@@ -2,11 +2,11 @@
 
 EmailScraper is a .NET application for creating a local, structured and searchable archive of email messages.
 
-It retrieves messages from Gmail, preserves the original email content, extracts attachments and metadata, reconstructs conversations into threads, generates human-readable PDF representations, and maintains a SQLite database and search index for querying the resulting archive.
+It retrieves messages from Gmail and Microsoft 365/Outlook, preserves the original email content, extracts attachments and metadata, reconstructs conversations into threads, generates human-readable PDF representations, and maintains a SQLite database and search index for querying the resulting archive.
 
 The application supports both full archive creation and incremental synchronization.
 
-> **Current version:** 0.2.0
+> **Current version:** 0.3.0
 >
 > **Status:** Early development
 
@@ -15,7 +15,9 @@ The application supports both full archive creation and incremental synchronizat
 EmailScraper currently supports:
 
 - Full and incremental Gmail extraction scoped to configured addresses
-- Incremental synchronization using Gmail history
+- Full and incremental Microsoft 365 / Outlook extraction through Microsoft Graph
+- Provider-neutral email source configuration for multiple mailboxes
+- Incremental synchronization using Gmail history and provider checkpoints
 - Original message preservation as EML files
 - MIME parsing
 - Attachment extraction
@@ -25,7 +27,11 @@ EmailScraper currently supports:
 - Complete thread PDF generation
 - Full-text/search indexing
 - Archive validation and integrity checks
-- Stable provider message IDs and RFC Message-ID preservation
+- Stable `(SourceKey, ProviderMessageId)` identities and RFC Message-ID preservation
+- Separate raw Graph, raw MIME and canonical MIME message identities
+- Portable relative paths for archived EML files and content-addressed attachments
+- Per-message attachment filenames and explicit MIME part roles
+- Exact Unicode subjects plus a separate search-normalized subject
 - Incremental updates without re-downloading existing messages unnecessarily
 - Deterministic branching thread reconstruction with revision history
 - Revision-aware thread PDF regeneration
@@ -62,7 +68,7 @@ These files preserve the original MIME message and headers and should be conside
 
 ### `attachments/`
 
-Attachments extracted from MIME messages.
+Attachments extracted from MIME messages. Blob files are addressed by SHA-256 with a deterministic MIME-based extension, while the original filename belongs to each `MessageAttachments` occurrence. `Attachments.RelativePath` is the portable path used when resolving the archive on another operating system; legacy `FilePath` values may remain as historical provenance.
 
 ### `pdf/messages/`
 
@@ -79,7 +85,9 @@ Thread PDFs are regenerated only when the corresponding thread revision changes.
 The archive is produced in several stages:
 
 ```text
-Gmail
+Configured email sources
+  ├── Gmail
+  └── Microsoft 365 / Outlook
   │
   ▼
 Message acquisition
@@ -114,7 +122,7 @@ Configured perspective archives
   └──► Independent EML, database, attachment, PDF and search artifacts
 ```
 
-At startup, the application chooses the synchronization mode automatically. A missing synchronization checkpoint triggers a full synchronization; otherwise, an incremental synchronization runs. When messages are downloaded, parsing, thread reconstruction, organization, PDF generation and search indexing run automatically in that order. When nothing is downloaded, those complete-archive derived stages are skipped. Gmail draft and scheduled state is reconciled on every run. Configured perspective archives are then evaluated and rebuilt only when their retained evidence or address set has changed.
+At startup, the application chooses the synchronization mode automatically for each source. A missing source checkpoint triggers a full synchronization; otherwise, an incremental synchronization runs. When messages are downloaded, parsing, thread reconstruction, organization, PDF generation and search indexing run automatically in that order. When nothing is downloaded, those complete-archive derived stages are skipped. Gmail draft/scheduled and Microsoft 365 outbox state are reconciled on every run. Configured perspective archives are then evaluated and rebuilt only when their retained evidence or address set has changed.
 
 ## Message Identity
 
@@ -128,7 +136,7 @@ EmailScraper preserves several forms of message identity.
 
 ### RFC Message-ID
 
-The original RFC `Message-ID` header is preserved when available.
+The original RFC `Message-ID` header is preserved when available. `Messages.MessageIdRaw` stores the raw MIME header value, `MimeMessageIdCanonical` stores the parsed value only when it is valid, and `GraphInternetMessageIdRaw` preserves Microsoft Graph's independent identifier when supplied. These values are never silently substituted for one another.
 
 The RFC `Message-ID` is the preferred identity for correlating the same evidence between independently created or differently filtered databases. `ProviderMessageId` can also be used when the archives share the same provider context.
 
@@ -156,7 +164,7 @@ Current membership and parent relationships are stored in `MessageThreads`. A me
 
 ## Full Extraction
 
-A full extraction builds an archive from the available Gmail messages.
+A full extraction builds an archive from the available messages for every configured source.
 
 Conceptually:
 
@@ -180,7 +188,7 @@ A complete rebuild should be capable of recreating the derived archive from the 
 
 ## Incremental Synchronization
 
-After an initial archive has been created, EmailScraper can query Gmail for changes occurring after the last known Gmail history position.
+After an initial archive has been created, EmailScraper can query Gmail history or Microsoft Graph using the stored source checkpoint.
 
 New messages are downloaded and added to the existing archive.
 
@@ -230,6 +238,7 @@ EmailScraper is currently built using:
 - C#
 - SQLite
 - Gmail API
+- Microsoft Graph API
 - MIME parsing
 - QuestPDF
 
@@ -237,17 +246,34 @@ Additional libraries are used for message parsing, HTML processing and related a
 
 ## Configuration
 
-The application requires Gmail API credentials and appropriate authorization to access the mailbox being archived.
+The application requires the appropriate authorization for each configured source: a Google OAuth desktop-client file for Gmail, or a Microsoft Entra application client ID for Microsoft 365/Outlook.
 
-Configuration includes the provider, archive output location, database location and addresses used to select relevant messages:
+Configuration includes the complete archive paths and one or more email sources. Each source has its own provider identity, mailbox, filter and token settings:
 
 ```json
 {
-  "EmailProvider": "Gmail",
   "ArchivePath": "./archive",
   "DatabasePath": "./archive/archive.db",
-  "EmailAddresses": [
-    "person@example.com"
+  "EmailSources": [
+    {
+      "Id": "personal-gmail",
+      "Name": "Personal Gmail",
+      "Provider": "Gmail",
+      "MailboxAddress": "person@gmail.com",
+      "FilterAddresses": ["person@gmail.com"],
+      "CredentialsPath": "credentials.json",
+      "TokenPath": "token/personal-gmail/gmail"
+    },
+    {
+      "Id": "work-outlook",
+      "Name": "Work Outlook",
+      "Provider": "Microsoft365",
+      "MailboxAddress": "person@contoso.com",
+      "FilterAddresses": ["person@contoso.com"],
+      "ClientId": "00000000-0000-0000-0000-000000000000",
+      "TenantId": "common",
+      "TokenPath": "token/work-outlook/microsoft365.json"
+    }
   ],
   "PerspectiveArchives": [
     {
@@ -262,7 +288,9 @@ Configuration includes the provider, archive output location, database location 
 }
 ```
 
-The top-level `ArchivePath` and `DatabasePath` identify the complete source archive. `EmailAddresses` controls the Gmail query and the subsequent relevance check against sender and recipient headers; it does not define a complete-mailbox export independent of those addresses.
+The top-level `ArchivePath` and `DatabasePath` identify the complete source archive. `EmailSources` may contain Gmail and Microsoft 365/Outlook sources; `Id` must be stable and unique. `MailboxAddress` is checked against the authenticated account. `FilterAddresses` controls acquisition and relevance checks against exact sender and recipient mailboxes. An empty filter means all messages visible to that provider are eligible.
+
+For Gmail, `CredentialsPath` points to the downloaded OAuth desktop-client JSON. `TokenPath` selects the local refresh-token cache; if omitted, it defaults to `token/<source-id>/gmail`. For Microsoft 365, `ClientId` is the Entra application (client) ID, `TenantId` is normally `common` for a mixed/personal sign-in or your tenant ID for a single organization, and `TokenPath` defaults to `token/<source-id>/microsoft365.json`.
 
 `PerspectiveArchives` is optional. `Name` is a descriptive label used in console reporting and the perspective manifest; it does not control filtering. Each profile's `ArchivePath` identifies its derived output, while its `EmailAddresses` define visibility. A profile contains only messages where one of those addresses appears as an exact mailbox in `From`, `To`, `Cc` or visible `Bcc`. Multiple addresses in one profile are treated as aliases of the same perspective. On every run, Gmail's native `in:drafts` and `in:scheduled` searches are reconciled into the provider-neutral `Messages.IsUnsent` field. Unsent messages remain in the complete source archive, with their state recorded, but are excluded from every perspective archive.
 
@@ -272,7 +300,7 @@ Secrets and authentication credentials should not be committed to source control
 
 ## Gmail Setup
 
-EmailScraper currently supports Gmail through the Gmail API using OAuth 2.0.
+EmailScraper supports Gmail through the Gmail API using OAuth 2.0 delegated access.
 
 The application uses a **Desktop OAuth client** and requests read-only access to Gmail.
 
@@ -335,7 +363,56 @@ https://www.googleapis.com/auth/gmail.readonly
 
 ### 5. Create the desktop OAuth client
 
-Create an OAuth client with application type **Desktop app**, download its JSON credentials and make them available to the application as `credentials.json` in its runtime output directory. The first run opens the Google authorization flow and stores the resulting token locally.
+Create an OAuth client with application type **Desktop app**, download its JSON credentials and place it at the configured `CredentialsPath` (by default `credentials.json` in the runtime directory). The first run opens the Google authorization flow and stores a refresh-token cache at `TokenPath`. The application requests only `https://www.googleapis.com/auth/gmail.readonly`; it does not send, delete or modify messages. See the [Gmail API .NET quickstart](https://developers.google.com/gmail/api/quickstart/dotnet) for the current Google Console screens.
+
+## Microsoft 365 / Outlook Setup
+
+The Microsoft 365 provider reads the authenticated mailbox through Microsoft Graph. It uses delegated device-code authentication, stores the access/refresh-token cache locally, and requests these scopes:
+
+```text
+offline_access
+Mail.Read
+User.Read
+```
+
+No client secret is required for this local console application. Keep the client ID and token cache private, and never commit the cache to source control.
+
+### 1. Register the application in Microsoft Entra ID
+
+1. Open the [Microsoft Entra admin center](https://entra.microsoft.com/).
+2. Go to **Entra ID → App registrations → New registration**.
+3. Give the application a name such as `EmailScraper`.
+4. Select the account type matching the mailbox: **single tenant** for one organization, or a multitenant/personal-account option when required.
+5. Select **Register** and copy the **Application (client) ID** into `EmailSources[].ClientId`.
+
+The provider uses device-code flow, so no web redirect URI or client secret is needed. In **Authentication → Advanced settings**, enable **Allow public client flows**. This is the Entra setting that permits a native/console application to use device authorization.
+
+### 2. Add Microsoft Graph permissions
+
+Under **API permissions → Add a permission → Microsoft Graph → Delegated permissions**, add:
+
+- `Mail.Read`
+- `User.Read`
+- `offline_access` (usually granted as an OpenID/OAuth scope)
+
+Grant administrator consent if the tenant requires it. The first Microsoft 365 run prints a device sign-in URL and code; open the URL in a browser, authenticate as the configured mailbox, and approve the requested permissions. The token is then cached at `TokenPath` and reused on later runs.
+
+### 3. Configure the source
+
+```json
+{
+  "Id": "outlook",
+  "Name": "Outlook mailbox",
+  "Provider": "Microsoft365",
+  "MailboxAddress": "person@contoso.com",
+  "FilterAddresses": ["person@contoso.com"],
+  "ClientId": "your-application-client-id",
+  "TenantId": "your-tenant-id-or-common",
+  "TokenPath": "token/outlook/microsoft365.json"
+}
+```
+
+`Provider` also accepts `Outlook` or `Office365`. `TenantId` may be `common`, `organizations`, `consumers`, or a concrete directory (tenant) ID, depending on the account type selected during registration. The provider downloads raw message bytes from Graph, preserves them as EML, records the Graph conversation ID and continues through the same MIME, threading, PDF, search and validation pipeline as Gmail. See Microsoft's [app registration guide](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app), [desktop app configuration](https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-app-configuration) and [device-code flow documentation](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code) for portal details.
 
 ## Usage
 
@@ -377,13 +454,13 @@ EmailScraper is under active development.
 
 Known architectural limitations include:
 
-- Gmail is currently the primary supported mail source.
+- Gmail and Microsoft 365/Outlook are supported mail sources.
 - Thread reconstruction can evolve as additional edge cases are discovered.
 - Internal numeric database IDs are not guaranteed to remain identical across independent full rebuilds.
 - `SearchDocuments` stores at most one thread ID per message; use `MessageThreads` when all memberships are required.
 - Search behavior and normalization are still evolving.
 - Derived processing currently runs only when synchronization downloads messages; external archive changes do not automatically trigger a rebuild.
-- The current schema is intended for fresh databases and does not provide migrations from earlier development schemas.
+- Additive schema migrations are applied when the database starts; keep a backup before upgrading an archive while the project remains pre-1.0.
 
 ## Planned Development
 
@@ -405,9 +482,7 @@ archives/
 
 ### Additional email providers
 
-Implement additional acquisition providers against the existing provider interface and common archive model.
-
-A future architecture may resemble:
+Additional acquisition providers can be implemented against the existing provider interface and common archive model. The current architecture already supports:
 
 ```text
                ┌── Gmail
@@ -427,7 +502,7 @@ The parsing, threading, PDF, indexing and validation layers should not need to k
 
 ## Development Status
 
-Version `0.2.x` adds independently rebuilt perspective archives, unsent-message exclusion and explicit partial-thread evidence to the archival implementation.
+Version `0.3.0` adds the provider-neutral source model and Microsoft 365/Outlook acquisition through Microsoft Graph, while retaining Gmail extraction and the existing perspective/archive pipeline. It also strengthens attachment provenance, portable paths, MIME-role classification and provider/MIME identity preservation.
 
 The project currently prioritizes correctness, reproducibility and validation over API stability or polished user experience.
 

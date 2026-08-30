@@ -4,6 +4,8 @@ public sealed class ThreadMessage
 {
     public long Id { get; set; }
 
+    public string SourceKey { get; set; } = "";
+
     public string ProviderMessageId { get; set; } = "";
 
     public string? ProviderThreadId { get; set; }
@@ -27,4 +29,6 @@ public sealed class ThreadMessage
     public string? Bcc { get; set; }
 
     public string MessageType { get; set; } = "Email";
+
+    public string FilePath { get; set; } = "";
 }

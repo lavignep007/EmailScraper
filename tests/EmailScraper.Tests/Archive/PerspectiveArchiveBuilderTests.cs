@@ -18,20 +18,28 @@ public sealed class PerspectiveArchiveBuilderTests
             isUnsent: true);
         await AddSourceMessageAsync(source.Path, sourceMessagesPath,
             "missed-scheduled", "a@example.test", "b@example.test", null);
+        await AddSourceMessageAsync(source.Path, sourceMessagesPath,
+            "other-source-unsent", "a@example.test", "b@example.test", null,
+            isUnsent: true,
+            sourceKey: "other-source");
 
         var changes = await Database.ReconcileUnsentMessagesAsync(
             source.Path,
+            "test-source",
             new HashSet<string>(["missed-scheduled", "not-in-this-archive"]));
 
         changes.CurrentlyUnsent.Should().Be(1);
         changes.NewlyUnsent.Should().Be(1);
         changes.NewlyDelivered.Should().Be(1);
         (await ReadValuesAsync(source.Path, """
-            SELECT ProviderMessageId || ':' || IsUnsent
+            SELECT SourceKey || ':' || ProviderMessageId || ':' || IsUnsent
             FROM Messages
-            ORDER BY ProviderMessageId;
+            ORDER BY SourceKey, ProviderMessageId;
             """))
-            .Should().Equal("missed-scheduled:1", "previously-unsent:0");
+            .Should().Equal(
+                "other-source:other-source-unsent:1",
+                "test-source:missed-scheduled:1",
+                "test-source:previously-unsent:0");
     }
 
     [Fact]
@@ -56,6 +64,9 @@ public sealed class PerspectiveArchiveBuilderTests
             await AddSourceMessageAsync(source.Path, sourceMessagesPath,
                 "excluded-unsent", "a@example.test", "b1@example.test", "scheduled-secret.txt",
                 isUnsent: true);
+            await AddSourceMessageAsync(source.Path, sourceMessagesPath,
+                "excluded-other-source", "a@example.test", "b1@example.test", "other-source.txt",
+                sourceKey: "syndicate-source");
 
             await EmailScraper.Archive.PerspectiveArchiveBuilder.BuildAsync(
                 source.Path,
@@ -63,9 +74,10 @@ public sealed class PerspectiveArchiveBuilderTests
                 new PerspectiveArchiveConfig
                 {
                     Name = "Moriarty",
-                    ArchivePath = targetPath + Path.DirectorySeparatorChar,
-                    EmailAddresses = ["b1@example.test", "B2@example.test"]
-                });
+                    ArchivePath = targetPath + Path.DirectorySeparatorChar
+                },
+                [new PerspectiveSourceRule(
+                    "test-source", ["b1@example.test", "B2@example.test"])]);
 
             var targetDatabase = Path.Combine(targetPath, "archive.db");
             (await ReadValuesAsync(targetDatabase, "SELECT ProviderMessageId FROM Messages ORDER BY ProviderMessageId;"))
@@ -88,9 +100,10 @@ public sealed class PerspectiveArchiveBuilderTests
                 new PerspectiveArchiveConfig
                 {
                     Name = "Moriarty",
-                    ArchivePath = targetPath + Path.DirectorySeparatorChar,
-                    EmailAddresses = ["b2@example.test", "b1@example.test"]
-                });
+                    ArchivePath = targetPath + Path.DirectorySeparatorChar
+                },
+                [new PerspectiveSourceRule(
+                    "test-source", ["b2@example.test", "b1@example.test"])]);
             (await File.ReadAllTextAsync(Path.Combine(targetPath, "perspective-manifest.json")))
                 .Should().Be(manifestBefore, "an unchanged address set and evidence set should not rebuild the projection");
 
@@ -111,7 +124,8 @@ public sealed class PerspectiveArchiveBuilderTests
         string from,
         string to,
         string? attachmentName,
-        bool isUnsent = false)
+        bool isUnsent = false,
+        string sourceKey = "test-source")
     {
         var fileName = $"20260101_Evidence_{providerMessageId}.eml";
         var filePath = Path.Combine(messagesPath, fileName);
@@ -128,6 +142,8 @@ public sealed class PerspectiveArchiveBuilderTests
 
         await Database.InsertMessageAsync(databasePath, new MessageRecord
         {
+            SourceKey = sourceKey,
+            Provider = "Test",
             ProviderMessageId = providerMessageId,
             MessageId = $"<{providerMessageId}@example.test>",
             Date = "2026-01-01T12:00:00+00:00",

@@ -55,6 +55,8 @@ public sealed class PdfGeneratorTests
 
         await Database.InsertMessageAsync(databasePath, new MessageRecord
         {
+            SourceKey = "test-source",
+            Provider = "Test",
             ProviderMessageId = providerMessageId,
             MessageId = messageId,
             InReplyTo = inReplyTo,
@@ -65,7 +67,8 @@ public sealed class PdfGeneratorTests
             FilePath = filePath
         });
 
-        var stored = await Database.GetMessageByProviderMessageIdAsync(databasePath, providerMessageId);
+        var stored = await Database.GetMessageByProviderMessageIdAsync(
+            databasePath, "test-source", providerMessageId);
         await Database.UpdateMessageOrganizationAsync(databasePath, stored!.Id, $"messages/{fileName}", subject);
         return stored.Id;
     }
